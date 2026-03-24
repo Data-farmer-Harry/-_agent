@@ -1,0 +1,42 @@
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+**/.venv/
+venv/
+env/
+
+# Local environment files
+.env
+**/.env
+.env.local
+**/.env.local
+
+# Node / frontend builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+coverage/
+**/coverage/
+
+# Generated runtime artifacts
+tmp/
+**/tmp/
+logs/
+**/*.log
