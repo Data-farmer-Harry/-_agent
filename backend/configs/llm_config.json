@@ -1,0 +1,10 @@
+{
+  "llm_api_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+  "llm_model": "qwen3-coder-plus",
+  "llm_request_timeout_seconds": 120,
+  "llm_max_tokens": 4000,
+  "agent_max_steps": 10,
+  "agent_max_repair_attempts": 2,
+  "python_executable": "",
+  "notes": "Real API key should be provided through process env, configs/.env, or the legacy backend/.env fallback."
+}

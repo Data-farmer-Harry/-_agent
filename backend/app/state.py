@@ -1,0 +1,388 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Literal, Optional, TypedDict
+
+from pydantic import BaseModel, Field, model_validator
+
+
+DiagramType = Literal["binary", "ternary"]
+ArtifactKind = Literal["html", "code", "text", "json", "image", "video", "markdown", "csv"]
+ComputeDomain = Literal["phase_diagram", "lammps", "none"]
+PlanStepStatus = Literal["pending", "running", "completed", "failed"]
+RunStatus = Literal["draft", "queued", "running", "completed", "failed", "cancelled"]
+AgentStreamEventType = Literal[
+    "run_started",
+    "step_started",
+    "step_completed",
+    "step_failed",
+    "run_completed",
+    "run_error",
+]
+
+
+class ConversationTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(default="", min_length=1, max_length=4000)
+
+
+class UploadedAsset(BaseModel):
+    asset_id: str = ""
+    name: str = ""
+    media_type: str = "application/octet-stream"
+    data_url: str = ""
+    size_bytes: int | None = None
+
+
+class AxisSpec(BaseModel):
+    label: str = ""
+    minimum: float | None = None
+    maximum: float | None = None
+    unit: str = ""
+
+
+class CriticalPoint(BaseModel):
+    label: str = ""
+    composition: float | None = None
+    temperature: float | None = None
+    notes: str = ""
+
+
+class RecognitionResult(BaseModel):
+    system: str = ""
+    diagram_type: DiagramType = "binary"
+    x_axis: AxisSpec = Field(default_factory=AxisSpec)
+    y_axis: AxisSpec = Field(default_factory=AxisSpec)
+    phases: list[str] = Field(default_factory=list)
+    critical_points: list[CriticalPoint] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    source: str = ""
+    raw_summary: str = ""
+
+
+class DiagramRequest(BaseModel):
+    system_name: str = Field(..., min_length=1, description="Material system name, e.g. Al-Zn")
+    diagram_type: DiagramType = Field(default="binary")
+    temperature_min: float = Field(default=300.0, description="Minimum temperature in K")
+    temperature_max: float = Field(default=1800.0, description="Maximum temperature in K")
+    pressure: float = Field(default=101325.0, description="Pressure in Pa")
+    step_size: float = Field(default=50.0, gt=0, description="Sampling step size")
+    notes: str = Field(default="", description="Additional user notes")
+
+    @model_validator(mode="after")
+    def validate_temperature_range(self) -> "DiagramRequest":
+        if self.temperature_max <= self.temperature_min:
+            raise ValueError("temperature_max must be greater than temperature_min")
+        return self
+
+
+class LammpsRequest(BaseModel):
+    material: str = Field(default="", description="Material symbol such as Cu/Al/Ni")
+    potential_family: str = Field(default="eam", description="Potential family such as eam or lj")
+    task_type: str = Field(default="equilibration", description="LAMMPS task type")
+    temperature: int = Field(default=900, description="Target temperature in K")
+    steps: int = Field(default=5000, description="Number of MD steps")
+    ensemble: str = Field(default="NVT", description="Simulation ensemble")
+    box_size: int = Field(default=4, description="Cubic box repetition size")
+    initial_temp: int | None = Field(default=None, description="Initial temperature in K")
+    time_step: float = Field(default=0.001, description="Time step in ps")
+    dump_file: str = Field(default="dump.atom")
+    custom_potential_path: str = Field(default="")
+    custom_structure_path: str = Field(default="")
+    custom_structure_format: str = Field(default="")
+    notes: str = Field(default="")
+
+    @model_validator(mode="after")
+    def validate_request(self) -> "LammpsRequest":
+        if self.temperature <= 0:
+            raise ValueError("temperature must be greater than 0")
+        if self.steps <= 0:
+            raise ValueError("steps must be greater than 0")
+        if self.box_size <= 0:
+            raise ValueError("box_size must be greater than 0")
+        if self.time_step <= 0:
+            raise ValueError("time_step must be greater than 0")
+        return self
+
+
+class LastRunContext(BaseModel):
+    run_id: str = ""
+    route_name: str = ""
+    compute_domain: ComputeDomain = "none"
+    system_name: str = ""
+    final_message: str = ""
+    generated_code_preview: str = ""
+    review_summary: str = ""
+    selected_tool: str = ""
+    generation_source: str = ""
+    request_summary: str = ""
+    review_passed: bool | None = None
+    review_issues: list[str] = Field(default_factory=list)
+    review_advisory_issues: list[str] = Field(default_factory=list)
+    trace_summary: list[str] = Field(default_factory=list)
+    recognition_summary: str = ""
+    artifact_names: list[str] = Field(default_factory=list)
+
+
+class AgentChatRequest(BaseModel):
+    conversation_id: str = Field(default="default")
+    message: str = Field(..., min_length=1)
+    system_name: str = Field(default="")
+    diagram_type: DiagramType = Field(default="binary")
+    temperature_min: float = Field(default=300.0)
+    temperature_max: float = Field(default=1800.0)
+    pressure: float = Field(default=101325.0)
+    step_size: float = Field(default=50.0, gt=0)
+    notes: str = Field(default="")
+    uploaded_assets: list[UploadedAsset] = Field(default_factory=list)
+    conversation_history: list[ConversationTurn] = Field(default_factory=list)
+    last_run_context: LastRunContext = Field(default_factory=LastRunContext)
+
+    @model_validator(mode="after")
+    def validate_chat_request(self) -> "AgentChatRequest":
+        if self.temperature_max <= self.temperature_min:
+            raise ValueError("temperature_max must be greater than temperature_min")
+        return self
+
+
+class PromptSuggestionRequest(BaseModel):
+    conversation_id: str = Field(default="default")
+    draft_message: str = Field(default="", max_length=4000)
+    conversation_history: list[ConversationTurn] = Field(default_factory=list)
+    last_run_context: LastRunContext = Field(default_factory=LastRunContext)
+    current_context_summary: str = Field(default="", max_length=4000)
+
+
+class PromptSuggestionResponse(BaseModel):
+    suggested_prompt: str
+    rationale: str = ""
+    source: str = "llm_prompt_suggester"
+
+
+class ResultProfile(BaseModel):
+    category: str = ""
+    source_label: str = ""
+    mode_label: str = ""
+    trust_level: Literal["high", "medium", "low", "unknown"] = "unknown"
+    confidence: float | None = None
+    trust_statement: str = ""
+    assumptions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+
+
+class DiagnosticCheck(BaseModel):
+    name: str
+    status: Literal["ok", "warning", "error", "unknown"] = "unknown"
+    summary: str = ""
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class SystemDiagnosticsResponse(BaseModel):
+    generated_at: str
+    overall_status: Literal["ok", "warning", "error"] = "warning"
+    checks: list[DiagnosticCheck] = Field(default_factory=list)
+
+
+class HealthResponse(BaseModel):
+    status: str
+    app_name: str
+    version: str
+
+
+class ThermoRegistryEntry(BaseModel):
+    system_name: str
+    aliases: list[str] = Field(default_factory=list)
+    family: str
+    format: str
+    database_name: str
+    database_file: str
+    documentation_url: str
+    source_url: str
+    provenance: str
+    components: list[str] = Field(default_factory=list)
+    phases: list[str] = Field(default_factory=list)
+    x_component: str
+    x_axis_label: str
+    summary: str
+    tags: list[str] = Field(default_factory=list)
+    accuracy_reference: dict[str, object] = Field(default_factory=dict)
+
+
+class ThermoRegistryResponse(BaseModel):
+    count: int
+    systems: list[ThermoRegistryEntry] = Field(default_factory=list)
+
+
+class ThermoRagCandidate(BaseModel):
+    system_name: str
+    score: float
+    selection_strategy: str = ""
+    match_reasons: list[str] = Field(default_factory=list)
+    matched_terms: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    components: list[str] = Field(default_factory=list)
+    phases: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    database_name: str = ""
+    summary: str = ""
+    source_url: str = ""
+
+
+class ThermoRagSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=4000)
+    top_k: int = Field(default=5, ge=1, le=10)
+
+
+class ThermoRagSearchResponse(BaseModel):
+    query: str
+    matched: bool = False
+    selection_strategy: str = "none"
+    selected_system_name: str | None = None
+    recommended_embedding_model: str = ""
+    candidates: list[ThermoRagCandidate] = Field(default_factory=list)
+    note: str = ""
+
+
+class ExecutionResult(BaseModel):
+    success: bool
+    stdout: str = ""
+    stderr: str = ""
+    html_content: Optional[str] = None
+    html_path: Optional[str] = None
+
+
+class ArtifactRef(BaseModel):
+    kind: ArtifactKind
+    name: str
+    path: Optional[str] = None
+    url: Optional[str] = None
+    content: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskRoute(BaseModel):
+    name: str = "conversation.answer"
+    workspace_id: str = "materials_agent"
+    reason: str = ""
+    selected_tool: Optional[str] = None
+    intent: str = ""
+    decision_source: str = ""
+    decision_confidence: float | None = None
+    compute_domain: ComputeDomain = "none"
+
+
+class PlanStep(BaseModel):
+    index: int
+    tool_name: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    status: PlanStepStatus = "pending"
+    retryable: bool = False
+    description: str = ""
+    stage: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolObservation(BaseModel):
+    step_index: int
+    tool_name: str
+    success: bool
+    summary: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    output: dict[str, Any] = Field(default_factory=dict)
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    state_delta: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunTrace(BaseModel):
+    run_id: str
+    route: TaskRoute
+    steps: list[PlanStep] = Field(default_factory=list)
+    observations: list[ToolObservation] = Field(default_factory=list)
+    termination_reason: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRunResponse(ExecutionResult):
+    success: bool
+    run_id: str
+    conversation_id: str = "default"
+    route: TaskRoute
+    final_message: str
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
+    plan_steps: list[PlanStep] = Field(default_factory=list)
+    trace: list[ToolObservation] = Field(default_factory=list)
+    generated_code: Optional[str] = None
+    termination_reason: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    recognition_result: RecognitionResult | None = None
+    current_context_summary: str = ""
+    summary: dict[str, Any] = Field(default_factory=dict)
+    run_status: RunStatus = "completed"
+
+
+class RunRecordSummary(BaseModel):
+    run_id: str
+    conversation_id: str = "default"
+    status: RunStatus = "completed"
+    route: TaskRoute = Field(default_factory=TaskRoute)
+    final_message: str = ""
+    summary: dict[str, Any] = Field(default_factory=dict)
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
+    trace: list[ToolObservation] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class AgentStreamEvent(BaseModel):
+    type: AgentStreamEventType
+    run_id: str
+    emitted_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemorySnapshot(BaseModel):
+    conversation_id: str
+    messages: list[ConversationTurn] = Field(default_factory=list)
+    uploaded_assets: list[UploadedAsset] = Field(default_factory=list)
+    recognition_result: RecognitionResult | None = None
+    last_run_context: LastRunContext = Field(default_factory=LastRunContext)
+    session_title: str = ""
+    last_user_message: str = ""
+    message_count: int = 0
+    asset_count: int = 0
+    summary_version: str = "v2"
+    current_context_summary: str = ""
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class AgentGraphState(TypedDict, total=False):
+    run_id: str
+    conversation_id: str
+    request: AgentChatRequest
+    messages: list[ConversationTurn]
+    uploaded_assets: list[UploadedAsset]
+    user_intent: str
+    next_step: str
+    supervisor_decision: dict[str, Any]
+    compute_domain: ComputeDomain
+    route: TaskRoute
+    recognition_result: RecognitionResult | None
+    phase_diagram_request: DiagramRequest | None
+    phase_diagram_result: AgentRunResponse | None
+    lammps_request: LammpsRequest | None
+    lammps_result: AgentRunResponse | None
+    last_run_context: LastRunContext
+    artifact_messages: list[ArtifactRef]
+    current_context_summary: str
+    final_answer: str
+    error: str
+    success: bool
+    termination_reason: str
+    response_metadata: dict[str, Any]
+    plan_steps: list[PlanStep]
+    trace: list[ToolObservation]
+    event_sink: Any
+    memory_snapshot: MemorySnapshot

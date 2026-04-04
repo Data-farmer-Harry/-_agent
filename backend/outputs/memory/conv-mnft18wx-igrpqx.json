@@ -1,0 +1,35 @@
+{
+  "conversation_id": "conv-mnft18wx-igrpqx",
+  "messages": [
+    {
+      "role": "user",
+      "content": "什么是共析点，它和包晶反应有什么区别？"
+    },
+    {
+      "role": "assistant",
+      "content": "共析点（Eutectoid Point）和包晶反应（Peritectic Reaction）是材料科学中两个重要的相变概念，它们有以下区别：\n\n## 共析点\n- **定义**：在冷却过程中，一个固相同时分解为两个不同固相的温度点\n- **反应式**：γ → α + β\n- **特点**：单一固相在恒温下分解为两个不同的固相\n- **典型例子**：铁碳合金中的珠光体形成，奥氏体（γ-Fe）在727°C分解为铁素体（α-Fe）和渗碳体（Fe₃C）\n\n## 包晶反应  \n- **定义**：一个固相与液相反应生成另一个固相的过程\n- **反应式**：α + L → β\n- **特点**：需要液相参与，是一个固相与液相结合形成新固相\n- **发生条件**：在特定温度下，原有的固相与周围的液相发生反应\n\n## 主要区别\n1. **相态参与**：共析反应只涉及固相，包晶反应涉及液相\n2. **反应物组成**：共析是一个固相分解，包晶是固相+液相结合\n3. **应用场景**：共析多见于固态相变，包晶多见于凝固过程\n\n这两个概念在相图分析和合金设计中都非常重要。"
+    }
+  ],
+  "uploaded_assets": [],
+  "recognition_result": null,
+  "last_run_context": {
+    "run_id": "",
+    "route_name": "",
+    "compute_domain": "none",
+    "system_name": "",
+    "final_message": "",
+    "generated_code_preview": "",
+    "review_summary": "",
+    "selected_tool": "",
+    "generation_source": "",
+    "request_summary": "",
+    "review_passed": null,
+    "review_issues": [],
+    "review_advisory_issues": [],
+    "trace_summary": [],
+    "recognition_summary": "",
+    "artifact_names": []
+  },
+  "current_context_summary": "U: 什么是共析点，它和包晶反应有什么区别？ | A: 共析点（Eutectoid Point）和包晶反应（Peritectic Reaction）是材料科学中两个重要的相变概念，它们有以下区别：  ## 共析点 - **定义**：在冷却过程中，一个固相同时分解为两个不同固相的温度点 - **反应式**：γ → α + β - **特",
+  "updated_at": "2026-04-01T08:49:31.950745+00:00"
+}

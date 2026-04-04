@@ -1,0 +1,21 @@
+{
+  "status": "cancelled",
+  "mode": "real",
+  "error": "Simulation cancelled by user",
+  "request": {
+    "original_query": "请帮我做一个铜材料的升温模拟，温度 900 K，步数 4000，用 EAM 势",
+    "normalized_request": {
+      "material": "Cu",
+      "potential_family": "eam",
+      "task_type": "heating",
+      "temperature": 900,
+      "steps": 4000
+    }
+  },
+  "progress": {
+    "stage": "cancelled",
+    "percent": 100,
+    "message": "任务已被主动取消。"
+  },
+  "artifacts": {}
+}

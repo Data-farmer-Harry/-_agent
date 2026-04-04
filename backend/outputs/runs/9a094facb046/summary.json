@@ -1,0 +1,24 @@
+{
+  "run_id": "9a094facb046",
+  "conversation_id": "conv-mnh0w3n6-txw1bx",
+  "status": "completed",
+  "route": {
+    "name": "supervisor.dispatch",
+    "workspace_id": "materials_agent",
+    "reason": "The global 4-agent graph is starting.",
+    "selected_tool": null,
+    "intent": "",
+    "decision_source": "",
+    "decision_confidence": null,
+    "compute_domain": "none"
+  },
+  "final_message": "SupervisorAgent 调用 LLM 进行任务路由时失败：LLM HTTP error 429: {\"error\":{\"code\":\"throttling\",\"message\":\"hour allocated quota exceeded.\",\"param\":null,\"type\":\"invalid_request_error\"},\"request_id\":\"f18a6310-7613-9417-abbc-0c0400d53985\"}",
+  "summary": {},
+  "artifacts": [],
+  "trace": [],
+  "metadata": {
+    "current_context_summary": "",
+    "error_type": "LLMRequiredError"
+  },
+  "updated_at": "2026-04-02T05:17:13.782084+00:00"
+}

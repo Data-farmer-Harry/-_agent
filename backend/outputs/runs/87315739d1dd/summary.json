@@ -1,0 +1,24 @@
+{
+  "run_id": "87315739d1dd",
+  "conversation_id": "conv-mnhndjpv-lct673",
+  "status": "completed",
+  "route": {
+    "name": "supervisor.dispatch",
+    "workspace_id": "materials_agent",
+    "reason": "The global 4-agent graph is starting.",
+    "selected_tool": null,
+    "intent": "",
+    "decision_source": "",
+    "decision_confidence": null,
+    "compute_domain": "none"
+  },
+  "final_message": "PhaseDiagramAgent 在解析生成请求时调用 LLM 失败：could not convert string to float: 'conservative'",
+  "summary": {},
+  "artifacts": [],
+  "trace": [],
+  "metadata": {
+    "current_context_summary": "",
+    "error_type": "LLMRequiredError"
+  },
+  "updated_at": "2026-04-02T15:46:38.613421+00:00"
+}

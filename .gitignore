@@ -28,15 +28,21 @@ env/
 # Node / frontend builds
 node_modules/
 **/node_modules/
+.vite/
+**/.vite/
 dist/
 **/dist/
 build/
 **/build/
 coverage/
 **/coverage/
+test-results/
+**/test-results/
 
 # Generated runtime artifacts
 tmp/
 **/tmp/
+outputs/*
+!outputs/.gitkeep
 logs/
 **/*.log

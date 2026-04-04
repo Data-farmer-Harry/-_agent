@@ -1,0 +1,10 @@
+{
+  "original_query": "Run an EAM equilibration for Al at 500K for 5000 steps.",
+  "normalized_request": {
+    "material": "Al",
+    "potential_family": "eam",
+    "task_type": "equilibration",
+    "temperature": 500,
+    "steps": 5000
+  }
+}

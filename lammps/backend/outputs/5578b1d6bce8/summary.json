@@ -1,0 +1,52 @@
+{
+  "status": "completed",
+  "mode": "real",
+  "error": "",
+  "request": {
+    "original_query": "请帮我做一个铜材料的升温模拟，温度 100 K，步数 1000，用 EAM 势。",
+    "normalized_request": {
+      "material": "Cu",
+      "potential_family": "eam",
+      "task_type": "heating",
+      "temperature": 100,
+      "steps": 1000
+    }
+  },
+  "metrics": {
+    "final_temp": 116.389,
+    "final_pe": -902.076,
+    "final_etotal": -898.239,
+    "max_press": 16440.594
+  },
+  "progress": {
+    "stage": "completed",
+    "percent": 100,
+    "message": "任务已完成，所有产物已写入 outputs 目录。"
+  },
+  "postprocess": {
+    "ovito_status": {
+      "supported_task": true,
+      "generated": true,
+      "reason": "diffusion trajectory image and 3D animation generated",
+      "backend": "python module",
+      "image_path": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/diffusion_trajectory.png",
+      "animation_path": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/diffusion_trajectory_3d.gif",
+      "video_path": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/ovito.mp4",
+      "metadata_path": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/diffusion_metadata.json"
+    }
+  },
+  "artifacts": {
+    "request.json": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/request.json",
+    "in.lammps": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/in.lammps",
+    "run.log": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/run.log",
+    "thermo.csv": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/thermo.csv",
+    "summary.json": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/summary.json",
+    "plot.png": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/plot.png",
+    "report.md": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/report.md",
+    "structure_summary.json": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/structure_summary.json",
+    "diffusion_trajectory.png": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/diffusion_trajectory.png",
+    "diffusion_trajectory_3d.gif": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/diffusion_trajectory_3d.gif",
+    "ovito.mp4": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/ovito.mp4",
+    "diffusion_metadata.json": "/Users/macos/Desktop/lammps_agent/outputs/5578b1d6bce8/diffusion_metadata.json"
+  }
+}

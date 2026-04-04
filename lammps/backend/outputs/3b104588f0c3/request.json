@@ -1,0 +1,7 @@
+{
+  "material": "Cu",
+  "potential_family": "eam",
+  "task_type": "heating",
+  "temperature": 900,
+  "steps": 100
+}

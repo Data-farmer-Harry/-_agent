@@ -1,0 +1,20 @@
+{
+  "original_query": "请用 LAMMPS 做一个 Al 的 heating 模拟，700K，5000 steps，NVT 系综，并返回 plot、report、gif 和 mp4。",
+  "normalized_request": {
+    "material": "Al",
+    "potential_family": "eam",
+    "task_type": "heating",
+    "temperature": 700,
+    "steps": 5000,
+    "ensemble": "NVT",
+    "box_size": 3,
+    "initial_temp": 300,
+    "time_step": 0.002,
+    "dump_file": "dump.aluminium_heating.lammpstrj",
+    "custom_potential_path": "",
+    "custom_structure_path": "",
+    "custom_structure_format": "",
+    "notes": "Single crystal Al FCC structure heating from 300K to 700K over 5000 steps in NVT ensemble. Standard EAM potential for Al. Trajectory will be saved for visualization."
+  },
+  "uploaded_attachments": []
+}
