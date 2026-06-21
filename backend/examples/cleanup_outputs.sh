@@ -10,15 +10,15 @@ usage() {
   cat <<'EOF'
 Usage: cleanup_outputs.sh [--apply] [--include-venv] [--include-node-modules]
 
-Default mode is dry-run and only prints reproducible paths that can be removed.
+Default mode is dry-run and only prints generated paths that can be removed.
 Use --apply to actually delete them.
 Use --include-venv only if you are happy to recreate backend/.venv afterwards.
 Use --include-node-modules only if you are happy to reinstall frontend dependencies afterwards.
 
 This script intentionally preserves:
-  - backend/outputs/memory
   - backend/configs/thermo_databases
   - benchmark datasets and source code
+  - backend/outputs/.gitkeep
 EOF
 }
 
@@ -41,8 +41,6 @@ done
 
 targets=(
   "$ROOT/frontend/dist"
-  "$ROOT/backend/outputs/runs"
-  "$ROOT/backend/outputs/recognition_diagnostics"
   "$ROOT/backend/.pytest_cache"
 )
 
@@ -70,6 +68,17 @@ for target in "${targets[@]}"; do
     echo "Missing: $target"
   fi
 done
+
+while IFS= read -r output_path; do
+  if [[ "$APPLY" -eq 1 ]]; then
+    echo "Removing: $output_path"
+    rm -rf "$output_path"
+  else
+    echo "Would remove: $output_path"
+  fi
+done < <(
+  find "$ROOT/backend/outputs" -mindepth 1 -maxdepth 1 ! -name .gitkeep -print 2>/dev/null | sort
+)
 
 while IFS= read -r cache_dir; do
   if [[ "$APPLY" -eq 1 ]]; then

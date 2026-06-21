@@ -12,8 +12,7 @@ phase_diagram_agent/
 ├── frontend/      # 前端界面
 ├── backend/       # 后端、agent、runtime、registry、tests
 ├── docs/          # 结构说明和专项设计文档
-├── README.md
-└── PROJECT_PROGRESS.md
+└── README.md
 ```
 
 ## 项目定位
@@ -453,13 +452,13 @@ LAMMPS 生成保留真实本地执行路径：
 如果要快速恢复项目上下文，请优先读：
 
 1. `README.md`
-2. `PROJECT_PROGRESS.md`
-3. `docs/ARCHITECTURE.md`
+2. `docs/ARCHITECTURE.md`
+3. `docs/RAG_PRODUCTION.md`
 
 其中：
 
-- `README.md` 只保留项目规划、结构和主线说明
-- `PROJECT_PROGRESS.md` 是最详细的开发/测试/未完成事项台账
+- `README.md` 保留运行方式、项目结构和主线说明
+- `docs/` 保留仍与当前实现对应的专项设计文档
 
 ## 当前规模
 
@@ -485,5 +484,5 @@ LAMMPS 生成保留真实本地执行路径：
   - lexical gate
   - BM25 weight 不压过结构化规则
   - `local_hash` fallback
-- 每次较大改动后，详细状态写入 `PROJECT_PROGRESS.md`
-- 在上下文压缩后，优先重新读取 `README.md` 和 `PROJECT_PROGRESS.md`
+- 代码状态以 Git 提交、测试和 benchmark 结果为准，不在仓库维护重复的开发流水账
+- 在上下文压缩后，优先重新读取 `README.md` 和 `docs/ARCHITECTURE.md`
