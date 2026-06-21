@@ -19,6 +19,8 @@ from app.agents.recognition import RecognitionAgent
 from app.runtimes.lammps import LammpsRuntime
 from app.runtimes.phase_diagram import PhaseDiagramRuntime
 from app.thermo.accuracy import build_thermo_accuracy_report, estimate_endpoint_liquidus
+from app.thermo.rag_index import build_thermo_card_index
+from app.thermo.rag_retriever import search_thermo_cards
 from app.thermo.registry import ThermoDatabaseCard, get_thermo_database_card
 from app.thermo.service import PhaseDiagramAgentService
 from app.thermo.codegen import CodeGenerationService
@@ -85,6 +87,304 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertEqual(result.system, "Al-Zn")
         self.assertEqual(result.source, "llm_recognition_agent")
 
+    def test_recognition_agent_normalizes_min_max_fields_and_preserves_low_temperature_window(self) -> None:
+        class NormalizingRecognitionLLM(ScriptedLLMClient):
+            def chat_multimodal_json(self, *, system_prompt: str, user_prompt: str, image_data_url: str, max_tokens: int = 2000, temperature: float = 0.1):  # type: ignore[override]
+                return {
+                    "system": "",
+                    "diagram_type": "Binary Phase Diagram",
+                    "x_axis": {"label": "Mole fraction Zn", "min": 0.0, "max": 1.0, "unit": ""},
+                    "y_axis": {"label": "Temperature (K)", "min": 4.0, "max": 5.0, "unit": "K"},
+                    "plot_region": {"left": 0.16, "top": 0.12, "right": 0.88, "bottom": 0.84, "confidence": 0.87},
+                    "phases": ["Liquid", "fcc_a1", "HCP_A3", "fcc_a1"],
+                    "critical_points": [{"label": "eutectic", "composition": "0.42", "temperature": "4.5", "x_norm": 0.48, "y_norm": 0.41, "confidence": 0.8, "notes": "stub"}],
+                    "labels": ["铝锌二元相图"],
+                    "confidence": 0.95,
+                    "raw_summary": "识别到铝锌二元相图截图。",
+                }
+
+        agent = RecognitionAgent(llm_client=NormalizingRecognitionLLM())
+        state: AgentGraphState = {
+            "request": build_request("请识别这张铝锌相图截图。"),
+            "uploaded_assets": [
+                UploadedAsset(
+                    asset_id="img-1",
+                    name="alzn_phase.png",
+                    media_type="image/png",
+                    data_url=MINI_PNG_DATA_URL,
+                    size_bytes=128,
+                )
+            ],
+        }
+
+        result = agent.recognize(state)
+
+        self.assertEqual(result.system, "Al-Zn")
+        self.assertEqual(result.diagram_type, "binary")
+        self.assertEqual(result.x_axis.minimum, 0.0)
+        self.assertEqual(result.x_axis.maximum, 1.0)
+        self.assertEqual(result.y_axis.minimum, 4.0)
+        self.assertEqual(result.y_axis.maximum, 5.0)
+        self.assertAlmostEqual(result.plot_region.left or 0, 0.16, places=3)
+        self.assertAlmostEqual(result.plot_region.bottom or 0, 0.84, places=3)
+        self.assertEqual(result.plot_region.source, "llm_plot_region")
+        self.assertEqual(result.phases, ["LIQUID", "FCC_A1", "HCP_A3"])
+        self.assertEqual(result.critical_points[0].temperature, 4.5)
+        self.assertAlmostEqual(result.critical_points[0].x_norm or 0, 0.48, places=3)
+        self.assertAlmostEqual(result.critical_points[0].y_norm or 0, 0.41, places=3)
+
+    def test_recognition_agent_normalizes_phase_objects_and_dict_like_strings(self) -> None:
+        class RichPhaseRecognitionLLM(ScriptedLLMClient):
+            def chat_multimodal_json(self, *, system_prompt: str, user_prompt: str, image_data_url: str, max_tokens: int = 2000, temperature: float = 0.1):  # type: ignore[override]
+                return {
+                    "system": "Al-Ni",
+                    "diagram_type": "binary",
+                    "x_axis": {"label": "Composition", "min": 0.0, "max": 1.0, "unit": "mole fraction"},
+                    "y_axis": {"label": "Temperature", "min": 200.0, "max": 2200.0, "unit": "°C"},
+                    "plot_region": {"left": 0.15, "top": 0.10, "right": 0.95, "bottom": 0.85, "confidence": 0.90},
+                    "phases": [
+                        {"name": "L", "description": "Liquid phase"},
+                        "{'name': 'Al', 'description': 'Aluminum solid solution'}",
+                        {"phase": "NiAl3"},
+                        "Ni5Al3",
+                    ],
+                    "critical_points": [],
+                    "labels": ["Al-Ni phase diagram"],
+                    "confidence": 0.9,
+                    "raw_summary": "识别到 Al-Ni 二元相图。",
+                }
+
+        agent = RecognitionAgent(llm_client=RichPhaseRecognitionLLM())
+        state: AgentGraphState = {
+            "request": build_request("请识别这张铝镍相图截图。"),
+            "uploaded_assets": [
+                UploadedAsset(
+                    asset_id="img-rich-phase",
+                    name="alni_phase.png",
+                    media_type="image/png",
+                    data_url=MINI_PNG_DATA_URL,
+                    size_bytes=128,
+                )
+            ],
+        }
+
+        result = agent.recognize(state)
+
+        self.assertEqual(result.phases, ["L", "AL", "NIAL3", "NI5AL3"])
+
+    def test_supervisor_routes_uploaded_image_explanation_to_recognition(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("请解释我上传这张相图里的相区和关键点。"),
+            "messages": [],
+            "uploaded_assets": [
+                UploadedAsset(
+                    asset_id="img-2",
+                    name="phase.png",
+                    media_type="image/png",
+                    data_url=MINI_PNG_DATA_URL,
+                    size_bytes=128,
+                )
+            ],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "recognition.analyze")
+
+    def test_supervisor_routes_uploaded_image_interactive_html_to_recognition(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("请把这张相图生成交互式html。"),
+            "messages": [],
+            "uploaded_assets": [
+                UploadedAsset(
+                    asset_id="img-html",
+                    name="phase.png",
+                    media_type="image/png",
+                    data_url=MINI_PNG_DATA_URL,
+                    size_bytes=128,
+                )
+            ],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "recognition.analyze")
+        self.assertEqual(decision["intent"], "recognize_image_to_interactive_simulator")
+
+    def test_supervisor_routes_recent_recognition_explain_to_chat(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("讲解一下"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "recognition_result": RecognitionResult(
+                system="Al-Ni",
+                diagram_type="binary",
+                x_axis=AxisSpec(label="composition"),
+                y_axis=AxisSpec(label="temperature", unit="K"),
+                phases=["LIQUID", "NIAL3"],
+                critical_points=[],
+                labels=["Al-Ni phase diagram"],
+                confidence=0.82,
+                source="llm_recognition_agent",
+                raw_summary="识别到 Al-Ni 二元相图。",
+            ),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "conversation.answer")
+
+    def test_supervisor_routes_uploaded_image_plus_regenerate_to_mixed(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("请先识别我上传的相图，再根据识别结果重新生成一张对应体系的可计算相图。"),
+            "messages": [],
+            "uploaded_assets": [
+                UploadedAsset(
+                    asset_id="img-3",
+                    name="phase.png",
+                    media_type="image/png",
+                    data_url=MINI_PNG_DATA_URL,
+                    size_bytes=128,
+                )
+            ],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "mixed.request")
+
+    def test_supervisor_routes_recognition_follow_up_generation_to_phase_compute(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("根据你刚才识别的结果生成对应体系的可计算相图。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "recognition_result": RecognitionResult(
+                system="Al-Zn",
+                diagram_type="binary",
+                x_axis=AxisSpec(label="Mole fraction Zn", minimum=0.0, maximum=1.0),
+                y_axis=AxisSpec(label="Temperature (K)", minimum=300.0, maximum=1000.0, unit="K"),
+                phases=["LIQUID", "FCC_A1", "HCP_A3"],
+                confidence=0.95,
+                source="llm_recognition_agent",
+                raw_summary="识别到 Al-Zn 二元相图。",
+            ),
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "phase_diagram.generate")
+
+    def test_supervisor_routes_lammps_follow_up_question_to_chat(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("你刚刚这轮模拟用了什么势函数，为什么这么选？"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(
+                run_id="run-lammps-1",
+                route_name="lammps.generate",
+                compute_domain="lammps",
+                system_name="Cu",
+                final_message="LAMMPS 结果已生成。",
+            ),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "conversation.answer")
+
+    def test_supervisor_clarifies_underspecified_lammps_request(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("帮我用 LAMMPS 跑一下模拟。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "conversation.answer")
+        self.assertEqual(decision["intent"], "clarify_lammps_request")
+        self.assertIn("material", decision["clarification_slots"])
+        self.assertIn("temperature", decision["clarification_slots"])
+        self.assertIn("steps", decision["clarification_slots"])
+
+    def test_supervisor_routes_complete_lammps_request_to_runtime(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("请用 LAMMPS 做 Cu heating，800K，4000 steps，NVT，EAM 势函数。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "lammps.generate")
+        self.assertEqual(decision["compute_domain"], "lammps")
+        self.assertEqual(decision["intent"], "run_lammps_simulation")
+
+    def test_chat_agent_returns_lammps_clarification_from_supervisor_decision(self) -> None:
+        agent = ChatAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("帮我用 LAMMPS 跑一下模拟。"),
+            "messages": [],
+            "last_run_context": LastRunContext(),
+            "supervisor_decision": {
+                "route_name": "conversation.answer",
+                "intent": "clarify_lammps_request",
+                "clarification_slots": ["material", "task_type", "temperature", "steps"],
+            },
+            "current_context_summary": "",
+        }
+
+        result = agent.run(state)
+
+        self.assertIn("补充", result["final_answer"])
+        self.assertIn("材料", result["final_answer"])
+        self.assertIn("温度", result["final_answer"])
+        self.assertIn("步数", result["final_answer"])
+
+    def test_supervisor_routes_phase_html_follow_up_to_chat(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("可以帮我生成交互式html吗？"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(
+                run_id="run-phase-1",
+                route_name="phase_diagram.generate",
+                compute_domain="phase_diagram",
+                system_name="Al-Co",
+                final_message="相图已生成。",
+                artifact_names=["result.html"],
+            ),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "conversation.answer")
+
     def test_chat_agent_answers_follow_up_from_last_run_context(self) -> None:
         agent = ChatAgent(llm_client=ScriptedLLMClient())
         state: AgentGraphState = {
@@ -109,6 +409,37 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertIn("build_calculated_phase_diagram_report", result["final_answer"])
         self.assertIn("pycalphad", result["final_answer"])
 
+    def test_chat_agent_explains_recent_recognition_without_triggering_html(self) -> None:
+        agent = ChatAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("讲解一下"),
+            "messages": [
+                ConversationTurn(role="user", content="请识别这张 Al-Ni 相图。"),
+                ConversationTurn(role="assistant", content="已完成识别。"),
+            ],
+            "route": TaskRoute(name="conversation.answer", workspace_id="materials_agent", reason="follow-up", selected_tool="chat"),
+            "recognition_result": RecognitionResult(
+                system="Al-Ni",
+                diagram_type="binary",
+                x_axis=AxisSpec(label="Mole fraction Ni", minimum=0.0, maximum=1.0, unit=""),
+                y_axis=AxisSpec(label="Temperature", minimum=300.0, maximum=1800.0, unit="K"),
+                phases=["LIQUID", "NIAL3", "NI2AL3"],
+                critical_points=[],
+                labels=["Al-Ni phase diagram"],
+                confidence=0.88,
+                source="llm_recognition_agent",
+                raw_summary="识别到 Al-Ni 二元相图。",
+            ),
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        result = agent.run(state)
+
+        self.assertIn("RecognitionAgent", result["final_answer"])
+        self.assertFalse(result["html_content"])
+        self.assertFalse(result["artifact_messages"])
+
     def test_chat_agent_prompt_constrains_capability_claims(self) -> None:
         llm = ScriptedLLMClient()
         agent = ChatAgent(llm_client=llm)
@@ -125,6 +456,64 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertEqual(last_call["method"], "chat_text")
         self.assertIn("Do not invent browsing", last_call["system_prompt"])
         self.assertIn("Do not describe yourself as a generic internet-enabled assistant", last_call["system_prompt"])
+
+    def test_chat_agent_reconstructs_previous_phase_result_via_internal_image_recognition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_service = ArtifactService(root_dir=Path(tmp_dir))
+            result_path = artifact_service.get_result_path("run-phase-html-1")
+            result_path.write_text(
+                (
+                    "<html><head></head><body><main id=\"phase-diagram-agent-result\">"
+                    f"<img alt=\"Al-Co calculated phase diagram\" src=\"{MINI_PNG_DATA_URL}\">"
+                    "</main></body></html>"
+                ),
+                encoding="utf-8",
+            )
+            agent = ChatAgent(llm_client=ScriptedLLMClient(), artifact_service=artifact_service)
+            state: AgentGraphState = {
+                "request": build_request("帮我生成交互式html"),
+                "messages": [
+                    ConversationTurn(role="user", content="请生成一张 Al-Co 二元相图。"),
+                    ConversationTurn(role="assistant", content="相图已生成。"),
+                ],
+                "last_run_context": LastRunContext(
+                    run_id="run-phase-html-1",
+                    route_name="phase_diagram.generate",
+                    compute_domain="phase_diagram",
+                    system_name="Al-Co",
+                    final_message="相图已生成。",
+                    artifact_names=["result.html"],
+                ),
+                "current_context_summary": "",
+            }
+
+            result = agent.run(state)
+
+        self.assertIn("不含原始图像", result["final_answer"])
+        self.assertTrue(result["html_content"])
+        self.assertIn('id="recognition-simulator-root"', result["html_content"])
+        self.assertIn("recognition-reconstruction-canvas", result["html_content"])
+        self.assertIn("generated_canvas_vector_reconstruction", result["html_content"])
+        self.assertIn("reconstruction_scene", result["html_content"])
+        self.assertNotIn("pixels_rgba_b64", result["html_content"])
+        self.assertNotIn(MINI_PNG_DATA_URL, result["html_content"])
+        self.assertTrue(result["response_metadata"]["generated_phase_simulator"])
+        self.assertEqual(result["response_metadata"]["simulation_render_mode"], "image_aware_vector_canvas_reconstruction")
+        self.assertTrue(result["response_metadata"]["source_image_found"])
+        self.assertTrue(result["response_metadata"]["source_image_inference_used"])
+        self.assertFalse(result["response_metadata"]["source_image_used"])
+        self.assertEqual(result["html_path"], str(result_path))
+        self.assertEqual(result["artifact_messages"][0].name, "result.html")
+        self.assertEqual(result["artifact_messages"][0].url, "/api/runs/run-phase-html-1/artifacts/result.html")
+        self.assertEqual(result["artifact_messages"][0].metadata["source"], "phase_diagram_followup_interactive_simulator")
+        self.assertTrue(result["artifact_messages"][0].metadata["source_image_found"])
+        self.assertTrue(result["artifact_messages"][0].metadata["source_image_inference_used"])
+        self.assertFalse(result["artifact_messages"][0].metadata["source_image_used"])
+        self.assertEqual(result["response_summary"]["followup_action"], "generate_phase_result_interactive_simulator")
+        self.assertTrue(result["response_summary"]["source_image_found"])
+        self.assertTrue(result["response_summary"]["source_image_inference_used"])
+        self.assertFalse(result["response_summary"]["source_image_used"])
+        self.assertEqual(result["termination_reason"], "conversation_answered_with_html_artifact")
 
     def test_strict_agent_mode_rejects_supervisor_without_llm(self) -> None:
         supervisor = SupervisorAgent()
@@ -360,6 +749,16 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertIsNone(card)
         self.assertEqual(retrieval["lookup_mode"], "exact_then_rag")
         self.assertFalse(retrieval["rag"]["matched"])
+
+    def test_thermo_rag_vector_layer_exposes_vector_score(self) -> None:
+        candidates = search_thermo_cards("alzn phase boundary database", top_k=3)
+
+        self.assertGreaterEqual(len(candidates), 1)
+        top = candidates[0]
+        self.assertEqual(top.card.system_name, "Al-Zn")
+        self.assertGreater(top.bm25_score, 0.0)
+        self.assertGreater(top.vector_score, 0.0)
+        self.assertEqual(top.embedding_backend, build_thermo_card_index()[0].embedding_backend)
 
     def test_phase_runtime_build_request_uses_recognition_temperature_and_notes(self) -> None:
         llm = ScriptedLLMClient()

@@ -1,3 +1,7 @@
+import { writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
 function readArg(name) {
   const prefix = `--${name}=`
   const match = process.argv.slice(2).find((item) => item.startsWith(prefix))
@@ -93,6 +97,7 @@ async function run() {
 
   await client.send('Page.enable')
   await client.send('Runtime.enable')
+  await client.send('DOM.enable')
   await client.send('Emulation.setDeviceMetricsOverride', {
     width: 1680,
     height: 1400,
@@ -106,30 +111,31 @@ async function run() {
   await client.waitFor("Boolean(document.querySelector('[data-testid=\"send-button\"]'))", 30000)
 
   if (UPLOAD_IMAGE) {
+    const uploadPath = path.join(os.tmpdir(), 'codex-smoke-diagram.png')
+    await writeFile(uploadPath, Buffer.from(MINI_PNG_BASE64, 'base64'))
+    const { root } = await client.send('DOM.getDocument', { depth: -1, pierce: true })
+    const { nodeId } = await client.send('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: 'input.upload-input',
+    })
+    await client.send('DOM.setFileInputFiles', {
+      nodeId,
+      files: [uploadPath],
+    })
     await client.evaluate(`(() => {
-      const input = document.querySelector('.upload-input')
-      const dropzone = document.querySelector('.upload-dropzone')
-      if (!(input instanceof HTMLInputElement) || !(dropzone instanceof HTMLElement)) {
+      const input = document.querySelector('input.upload-input')
+      if (!(input instanceof HTMLInputElement)) {
         return false
       }
-      const binary = atob(${JSON.stringify(MINI_PNG_BASE64)})
-      const bytes = new Uint8Array(binary.length)
-      for (let index = 0; index < binary.length; index += 1) {
-        bytes[index] = binary.charCodeAt(index)
-      }
-      const file = new File([bytes], 'diagram.png', { type: 'image/png' })
-      const dataTransfer = new DataTransfer()
-      dataTransfer.items.add(file)
-      Object.defineProperty(input, 'files', {
-        configurable: true,
-        value: dataTransfer.files,
-      })
       input.dispatchEvent(new Event('change', { bubbles: true }))
-      dropzone.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer }))
-      dropzone.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }))
       return true
     })()`)
-    await client.waitFor("document.querySelectorAll('.upload-preview-card').length > 0", 30000)
+    await client.waitFor(`(() => {
+      const uploadButton = Array.from(document.querySelectorAll('button')).find((node) =>
+        /Assets Attached|Upload Data/i.test(node.textContent || '')
+      )
+      return /Assets Attached/i.test(uploadButton?.textContent || '')
+    })()`, 30000)
   }
 
   await client.evaluate(`(() => {

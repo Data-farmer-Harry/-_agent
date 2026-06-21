@@ -1,7 +1,0 @@
-{
-  "material": "Al",
-  "potential_family": "eam",
-  "task_type": "equilibration",
-  "temperature": 500,
-  "steps": 5000
-}

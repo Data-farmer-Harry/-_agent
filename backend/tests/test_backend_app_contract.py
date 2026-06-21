@@ -135,7 +135,7 @@ class BackendAppContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertGreaterEqual(payload["count"], 16)
+        self.assertGreaterEqual(payload["count"], 29)
         systems = {item["system_name"] for item in payload["systems"]}
         self.assertIn("Al-Zn", systems)
         self.assertIn("Cu-Ni", systems)
@@ -149,6 +149,19 @@ class BackendAppContractTests(unittest.TestCase):
         self.assertIn("Fe-Co", systems)
         self.assertIn("Co-Cr", systems)
         self.assertIn("Nb-Ti", systems)
+        self.assertIn("Al-Cr", systems)
+        self.assertIn("Cr-Ni", systems)
+        self.assertIn("Al-Pt", systems)
+        self.assertIn("Ni-Pt", systems)
+        self.assertIn("Fe-Ni", systems)
+        self.assertIn("Co-Ni", systems)
+        self.assertIn("Al-Co", systems)
+        self.assertIn("Pd-Ru", systems)
+        self.assertIn("Pd-Tc", systems)
+        self.assertIn("Pd-Mo", systems)
+        self.assertIn("Ru-Tc", systems)
+        self.assertIn("Ru-Mo", systems)
+        self.assertIn("Tc-Mo", systems)
         first = payload["systems"][0]
         self.assertIn("database_name", first)
         self.assertIn("components", first)

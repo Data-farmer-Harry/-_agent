@@ -15,6 +15,31 @@ interface ArtifactResultPanelProps {
   onAiAnalyze: (prompt: string) => void;
 }
 
+type LammpsRagHit = Record<string, unknown>;
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function readLammpsRag(summary: Record<string, unknown>): {
+  planningHits: LammpsRagHit[];
+  errorHits: LammpsRagHit[];
+  material: string;
+} {
+  const rag = readObject(summary.materials_rag);
+  const planning = readObject(rag.planning);
+  const errorDiagnosis = readObject(rag.error_diagnosis);
+  return {
+    planningHits: Array.isArray(planning.hits) ? planning.hits as LammpsRagHit[] : [],
+    errorHits: Array.isArray(errorDiagnosis.hits) ? errorDiagnosis.hits as LammpsRagHit[] : [],
+    material: typeof planning.material === 'string' ? planning.material : '',
+  };
+}
+
+function formatRagScore(value: unknown): string {
+  return typeof value === 'number' ? value.toFixed(3) : '—';
+}
+
 export function ArtifactResultPanel({
   settings,
   runId,
@@ -32,6 +57,7 @@ export function ArtifactResultPanel({
   const [markdownText, setMarkdownText] = useState('');
   const metrics = summary.metrics && typeof summary.metrics === 'object' ? summary.metrics as Record<string, unknown> : {};
   const resultProfile = summary.result_profile && typeof summary.result_profile === 'object' ? summary.result_profile as ResultProfile : null;
+  const lammpsRag = useMemo(() => readLammpsRag(summary), [summary]);
   
   const imageArtifacts = useMemo(() => artifacts.filter((a) => a.kind === 'image' && !a.name.endsWith('.json')), [artifacts]);
   const videoArtifacts = useMemo(() => artifacts.filter((a) => a.kind === 'video'), [artifacts]);
@@ -71,6 +97,13 @@ export function ArtifactResultPanel({
     }
     return stages;
   }, [imageArtifacts, markdownArtifact, videoArtifacts]);
+  const lammpsRagPreviewHits = useMemo(
+    () => [
+      ...lammpsRag.planningHits.slice(0, 4).map((hit) => ({ hit, stage: 'planning' })),
+      ...lammpsRag.errorHits.slice(0, 2).map((hit) => ({ hit, stage: 'error' })),
+    ],
+    [lammpsRag],
+  );
 
   const handleAiClick = async (prompt: string) => {
     setIsGeminiAnalyzing(true);
@@ -336,6 +369,46 @@ export function ArtifactResultPanel({
                 })}
               </div>
             </div>
+
+            {lammpsRagPreviewHits.length ? (
+              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Knowledge Grounding</p>
+                <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                  {lammpsRag.material ? `Material hint: ${lammpsRag.material}. ` : ''}
+                  本轮 LAMMPS 请求解释和参数检查使用了这些 RAG 知识卡。
+                </p>
+                <div className="mt-3 space-y-2">
+                  {lammpsRagPreviewHits.map(({ hit, stage }, index) => (
+                    <div key={`${stage}-${String(hit.title || 'rag')}-${index}`} className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-200">{String(hit.title || 'Untitled knowledge card')}</p>
+                          <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                            {stage} · {String(hit.doc_type || 'knowledge')}
+                          </p>
+                        </div>
+                        <span className="shrink-0 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                          {formatRagScore(hit.score)}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+                        lexical {formatRagScore(hit.lexical_score)} · bm25 {formatRagScore(hit.bm25_score)} · vector {formatRagScore(hit.vector_score)}
+                      </p>
+                      {hit.source_url ? (
+                        <a
+                          href={String(hit.source_url)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-2 block truncate text-[11px] font-semibold text-indigo-300 hover:text-indigo-200"
+                        >
+                          {String(hit.source || hit.source_url)}
+                        </a>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             {downloadArtifacts.length ? (
               <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">

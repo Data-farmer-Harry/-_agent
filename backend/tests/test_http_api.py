@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import uuid
+import tempfile
 import unittest
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from app import api as api_module
-from app.state import UploadedAsset
+from app.config import settings
+from app.lammps.config import load_lammps_config, update_runtime_lammps_config
+from app.state import LastRunContext, UploadedAsset
 from tests.support import MINI_PNG_DATA_URL, ScriptedLLMClient, build_request
 
 
@@ -42,7 +46,7 @@ class HttpApiTests(unittest.TestCase):
         payload = response.json()
         self.assertIn(payload["overall_status"], {"ok", "warning", "error"})
         self.assertGreaterEqual(len(payload["checks"]), 5)
-        self.assertIn("LLM", [item["name"] for item in payload["checks"]])
+        self.assertIn("LLM / Multimodal", [item["name"] for item in payload["checks"]])
 
     def test_thermo_rag_search_endpoint_returns_ranked_candidates(self) -> None:
         with TestClient(api_module.app) as client:
@@ -55,8 +59,10 @@ class HttpApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["query"], "我想计算铝锌二元相图并查看液相线")
         self.assertTrue(payload["matched"])
+        self.assertIn(payload["embedding_backend"], {"local_hash", "llm_api", "openai_compatible"})
         self.assertGreaterEqual(len(payload["candidates"]), 1)
         self.assertEqual(payload["candidates"][0]["system_name"], "Al-Zn")
+        self.assertIn("vector_score", payload["candidates"][0])
         self.assertTrue(payload["recommended_embedding_model"])
 
     def test_plain_chat_request_stays_in_chat_mode(self) -> None:
@@ -106,9 +112,9 @@ class HttpApiTests(unittest.TestCase):
 
     def test_registry_miss_fails_honestly(self) -> None:
         request = build_request(
-            "请生成一张 Fe-Cu 二元相图，温度范围 300K-1800K。",
+            "请生成一张 Xx-Yy 二元相图，温度范围 300K-1800K。",
             conversation_id=f"miss-{uuid.uuid4().hex[:8]}",
-            system_name="Fe-Cu",
+            system_name="Xx-Yy",
             temperature_min=300.0,
             temperature_max=1800.0,
         )
@@ -147,6 +153,136 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(payload["route"]["name"], "conversation.answer")
         self.assertIn("build_calculated_phase_diagram_report", payload["final_message"])
         self.assertIn("Al-Mg", payload["final_message"])
+
+    def test_phase_html_follow_up_reconstructs_generated_html_inline(self) -> None:
+        conversation_id = f"follow-html-{uuid.uuid4().hex[:8]}"
+        generate_request = build_request(
+            "请生成一张 Al-Co 二元相图，温度范围 300K-1900K，突出 FCC_A1、BCC_B2、AL3CO 和液相区。",
+            conversation_id=conversation_id,
+            system_name="Al-Co",
+            temperature_min=300.0,
+            temperature_max=1900.0,
+        )
+        follow_up_request = build_request("帮我生成交互式html", conversation_id=conversation_id)
+
+        with ExitStack() as stack:
+            _patch_api_llm_clients(stack)
+            with TestClient(api_module.app) as client:
+                first_response = client.post("/api/agent/chat", json=generate_request.model_dump(mode="json"))
+                second_response = client.post("/api/agent/chat", json=follow_up_request.model_dump(mode="json"))
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        payload = second_response.json()
+        self.assertEqual(payload["route"]["name"], "conversation.answer")
+        self.assertTrue(payload["html_content"])
+        self.assertIn('id="recognition-simulator-root"', payload["html_content"])
+        self.assertIn("recognition-reconstruction-canvas", payload["html_content"])
+        self.assertIn("generated_canvas_vector_reconstruction", payload["html_content"])
+        self.assertIn("structured_path_reconstruction", payload["html_content"])
+        self.assertIn("reconstruction_scene", payload["html_content"])
+        self.assertNotIn("pixels_rgba_b64", payload["html_content"])
+        self.assertNotIn("phase-source-image", payload["html_content"])
+        self.assertNotIn("data:image/", payload["html_content"])
+        self.assertEqual(payload["artifacts"][0]["name"], "result.html")
+        self.assertEqual(payload["metadata"]["origin_route_name"], "phase_diagram.generate")
+        self.assertTrue(payload["metadata"]["generated_phase_simulator"])
+        self.assertEqual(payload["metadata"]["simulation_render_mode"], "image_aware_vector_canvas_reconstruction")
+        self.assertTrue(payload["metadata"]["source_image_found"])
+        self.assertTrue(payload["metadata"]["source_image_inference_used"])
+        self.assertFalse(payload["metadata"]["source_image_used"])
+        self.assertEqual(payload["summary"]["followup_action"], "generate_phase_result_interactive_simulator")
+        self.assertTrue(payload["summary"]["source_image_found"])
+        self.assertTrue(payload["summary"]["source_image_inference_used"])
+        self.assertFalse(payload["summary"]["source_image_used"])
+        self.assertEqual(payload["termination_reason"], "conversation_answered_with_html_artifact")
+
+    def test_phase_html_follow_up_recovers_real_phase_run_after_chat_context_pollution(self) -> None:
+        conversation_id = f"follow-html-recover-{uuid.uuid4().hex[:8]}"
+        generate_request = build_request(
+            "请生成一张 Al-Zn 二元相图，温度范围 300K-1000K，并解释主要相区。",
+            conversation_id=conversation_id,
+            system_name="Al-Zn",
+            temperature_min=300.0,
+            temperature_max=1000.0,
+        )
+        explain_request = build_request("你刚刚生成了什么代码？", conversation_id=conversation_id)
+        follow_up_request = build_request("帮我生成交互式html", conversation_id=conversation_id)
+
+        with ExitStack() as stack:
+            _patch_api_llm_clients(stack)
+            with TestClient(api_module.app) as client:
+                first_response = client.post("/api/agent/chat", json=generate_request.model_dump(mode="json"))
+                self.assertEqual(first_response.status_code, 200)
+                second_response = client.post("/api/agent/chat", json=explain_request.model_dump(mode="json"))
+                self.assertEqual(second_response.status_code, 200)
+                explain_payload = second_response.json()
+                follow_up_request.last_run_context = LastRunContext(
+                    run_id=explain_payload["run_id"],
+                    route_name="conversation.answer",
+                    compute_domain="none",
+                    system_name="",
+                    final_message=explain_payload["final_message"],
+                    generated_code_preview="",
+                    review_summary="",
+                    selected_tool="chat",
+                    generation_source="",
+                    request_summary="",
+                    review_passed=None,
+                    review_issues=[],
+                    review_advisory_issues=[],
+                    trace_summary=[],
+                    recognition_summary="",
+                    artifact_names=[],
+                )
+                third_response = client.post("/api/agent/chat", json=follow_up_request.model_dump(mode="json"))
+
+        self.assertEqual(third_response.status_code, 200)
+        payload = third_response.json()
+        self.assertEqual(payload["route"]["name"], "conversation.answer")
+        self.assertTrue(payload["html_content"])
+        self.assertIn('id="recognition-simulator-root"', payload["html_content"])
+        self.assertIn("recognition-reconstruction-canvas", payload["html_content"])
+        self.assertIn("generated_canvas_vector_reconstruction", payload["html_content"])
+        self.assertIn("reconstruction_scene", payload["html_content"])
+        self.assertNotIn("pixels_rgba_b64", payload["html_content"])
+        self.assertNotIn("phase-source-image", payload["html_content"])
+        self.assertTrue(payload["metadata"]["generated_phase_simulator"])
+        self.assertEqual(payload["metadata"]["origin_route_name"], "phase_diagram.generate")
+        self.assertTrue(payload["metadata"]["source_image_found"])
+        self.assertTrue(payload["metadata"]["source_image_inference_used"])
+        self.assertFalse(payload["metadata"]["source_image_used"])
+        self.assertEqual(payload["summary"]["followup_action"], "generate_phase_result_interactive_simulator")
+        self.assertTrue(payload["summary"]["source_image_found"])
+        self.assertTrue(payload["summary"]["source_image_inference_used"])
+        self.assertFalse(payload["summary"]["source_image_used"])
+        self.assertEqual(payload["termination_reason"], "conversation_answered_with_html_artifact")
+
+    def test_conversation_snapshot_endpoint_returns_memory_and_latest_run(self) -> None:
+        conversation_id = f"conv-snapshot-{uuid.uuid4().hex[:8]}"
+        request = build_request(
+            "请生成一张 Al-Zn 二元相图，温度范围 300K-1000K，突出液相线以及 FCC_A1 和 HCP_A3 两个主要固相区。",
+            conversation_id=conversation_id,
+            system_name="Al-Zn",
+            temperature_min=300.0,
+            temperature_max=1000.0,
+        )
+
+        with ExitStack() as stack:
+            _patch_api_llm_clients(stack)
+            with TestClient(api_module.app) as client:
+                response = client.post("/api/agent/chat", json=request.model_dump(mode="json"))
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                snapshot_response = client.get(f"/api/conversations/{conversation_id}")
+
+        self.assertEqual(snapshot_response.status_code, 200)
+        snapshot = snapshot_response.json()
+        self.assertEqual(snapshot["conversation_id"], conversation_id)
+        self.assertTrue(snapshot["short_term"]["messages"])
+        self.assertEqual(snapshot["short_term"]["last_run_context"]["run_id"], payload["run_id"])
+        self.assertEqual(snapshot["latest_run"]["run_id"], payload["run_id"])
+        self.assertEqual(snapshot["latest_run"]["route"]["name"], "phase_diagram.generate")
 
     def test_prompt_suggestion_endpoint_returns_contextual_llm_prompt(self) -> None:
         conversation_id = f"suggest-{uuid.uuid4().hex[:8]}"
@@ -225,6 +361,50 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(payload["route"]["name"], "recognition.analyze")
         self.assertIsNotNone(payload["recognition_result"])
         self.assertEqual(payload["recognition_result"]["source"], "llm_recognition_agent")
+        self.assertFalse(payload["html_content"])
+        self.assertFalse(payload["artifacts"])
+        self.assertNotIn("result_profile", payload["summary"])
+        self.assertNotIn("simulation_render_mode", payload["summary"])
+        self.assertNotIn("simulation_render_mode", payload["metadata"])
+
+    def test_recognition_html_request_returns_reconstruction_panel(self) -> None:
+        request = build_request("请识别这张相图截图，并在当前窗口生成交互式html。", conversation_id=f"rec-html-{uuid.uuid4().hex[:8]}")
+        request.uploaded_assets = [
+            UploadedAsset(
+                asset_id="img-1",
+                name="diagram.png",
+                media_type="image/png",
+                data_url=MINI_PNG_DATA_URL,
+                size_bytes=128,
+            )
+        ]
+
+        with ExitStack() as stack:
+            _patch_api_llm_clients(stack)
+            with TestClient(api_module.app) as client:
+                response = client.post("/api/agent/chat", json=request.model_dump(mode="json"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["route"]["name"], "recognition.analyze")
+        self.assertIsNotNone(payload["recognition_result"])
+        self.assertTrue(payload["html_content"])
+        self.assertIn("recognition-reconstruction-canvas", payload["html_content"])
+        self.assertIn("generated_canvas_vector_reconstruction", payload["html_content"])
+        self.assertIn("reconstruction_scene", payload["html_content"])
+        self.assertNotIn("pixels_rgba_b64", payload["html_content"])
+        self.assertNotIn("recognition-generated-svg", payload["html_content"])
+        self.assertNotIn("phase-source-image", payload["html_content"])
+        self.assertNotIn("data:image/png;base64", payload["html_content"])
+        self.assertEqual(payload["summary"]["result_profile"]["category"], "Recognized Simulation")
+        self.assertGreater(payload["summary"]["overlay_confidence"], 0.3)
+        self.assertEqual(payload["summary"]["simulation_render_mode"], "generated_canvas_vector_reconstruction")
+        self.assertTrue(payload["summary"]["source_image_present"])
+        self.assertEqual(payload["metadata"]["simulation_render_mode"], "generated_canvas_vector_reconstruction")
+        self.assertTrue(payload["metadata"]["source_image_present"])
+        artifact_names = {artifact["name"] for artifact in payload["artifacts"]}
+        self.assertIn("result.html", artifact_names)
+        self.assertIn("recognition_simulator.json", artifact_names)
 
     def test_lammps_request_runs_through_compute_agent_and_returns_artifacts(self) -> None:
         request = build_request(
@@ -260,22 +440,38 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("potentials", payload)
 
     def test_lammps_config_endpoints_round_trip_runtime_overrides(self) -> None:
-        with TestClient(api_module.app) as client:
-            get_response = client.get("/api/config/lammps")
-            self.assertEqual(get_response.status_code, 200)
+        original = load_lammps_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "llm_config.json"
+            try:
+                with patch("app.config.DEFAULT_JSON_FILE", config_path), TestClient(api_module.app) as client:
+                    get_response = client.get("/api/config/lammps")
+                    self.assertEqual(get_response.status_code, 200)
 
-            update_response = client.post(
-                "/api/config/lammps",
-                json={
-                    "force_mock": True,
-                    "allow_mock_fallback": True,
-                    "max_retries": 3,
-                },
-            )
-            self.assertEqual(update_response.status_code, 200)
-            payload = update_response.json()
+                    update_response = client.post(
+                        "/api/config/lammps",
+                        json={
+                            "force_mock": True,
+                            "allow_mock_fallback": True,
+                            "max_retries": 3,
+                        },
+                    )
+                    self.assertEqual(update_response.status_code, 200)
+                    payload = update_response.json()
 
-            confirm_response = client.get("/api/config/lammps")
+                    confirm_response = client.get("/api/config/lammps")
+            finally:
+                with patch("app.config.DEFAULT_JSON_FILE", config_path):
+                    update_runtime_lammps_config(
+                        {
+                            "force_mock": original.force_mock,
+                            "allow_mock_fallback": original.allow_mock_fallback,
+                            "max_retries": original.max_retries,
+                            "lammps_command": original.lammps_command,
+                            "potentials_dir": original.potentials_dir,
+                            "ovito_location": original.ovito_location,
+                        }
+                    )
 
         self.assertTrue(payload["updated"])
         self.assertTrue(payload["force_mock"])
@@ -287,25 +483,51 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(confirm_payload["max_retries"], 3)
 
     def test_llm_config_endpoints_expose_runtime_settings(self) -> None:
-        with TestClient(api_module.app) as client:
-            get_response = client.get("/api/config/llm")
-            self.assertEqual(get_response.status_code, 200)
+        original_model = settings.llm_model
+        original_timeout = settings.llm_request_timeout_seconds
+        original_require_llm = settings.require_llm_for_agents
+        original_thinking = settings.llm_enable_thinking
+        original_supports_chat = settings.llm_supports_chat
+        original_supports_vision = settings.llm_supports_vision
+        original_supports_embedding = settings.llm_supports_embedding
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "llm_config.json"
+            try:
+                with patch("app.config.DEFAULT_JSON_FILE", config_path), TestClient(api_module.app) as client:
+                    get_response = client.get("/api/config/llm")
+                    self.assertEqual(get_response.status_code, 200)
 
-            update_response = client.post(
-                "/api/config/llm",
-                json={
-                    "llm_model": "qwen3-coder-plus",
-                    "llm_request_timeout_seconds": 90,
-                    "require_llm_for_agents": True,
-                },
-            )
-            self.assertEqual(update_response.status_code, 200)
-            payload = update_response.json()
+                    update_response = client.post(
+                        "/api/config/llm",
+                        json={
+                            "llm_model": "qwen3.5-plus",
+                            "llm_enable_thinking": False,
+                            "llm_request_timeout_seconds": 90,
+                            "require_llm_for_agents": True,
+                            "llm_supports_chat": True,
+                            "llm_supports_vision": True,
+                            "llm_supports_embedding": False,
+                        },
+                    )
+                    self.assertEqual(update_response.status_code, 200)
+                    payload = update_response.json()
+            finally:
+                settings.llm_model = original_model
+                settings.llm_request_timeout_seconds = original_timeout
+                settings.require_llm_for_agents = original_require_llm
+                settings.llm_enable_thinking = original_thinking
+                settings.llm_supports_chat = original_supports_chat
+                settings.llm_supports_vision = original_supports_vision
+                settings.llm_supports_embedding = original_supports_embedding
 
         self.assertTrue(payload["updated"])
-        self.assertEqual(payload["llm_model"], "qwen3-coder-plus")
+        self.assertEqual(payload["llm_model"], "qwen3.5-plus")
+        self.assertFalse(payload["llm_enable_thinking"])
         self.assertEqual(payload["llm_request_timeout_seconds"], 90)
         self.assertTrue(payload["require_llm_for_agents"])
+        self.assertTrue(payload["llm_supports_chat"])
+        self.assertTrue(payload["llm_supports_vision"])
+        self.assertFalse(payload["llm_supports_embedding"])
 
     def test_lammps_run_endpoints_expose_history_summary_and_artifacts(self) -> None:
         conversation_id = f"lammps-artifacts-{uuid.uuid4().hex[:8]}"

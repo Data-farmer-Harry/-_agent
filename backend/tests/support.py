@@ -154,10 +154,53 @@ class ScriptedLLMClient:
         lowered = user_message.lower()
         if "Choose exactly one route_name" in system_prompt:
             has_image = "Uploaded assets" in user_prompt and "\"image/" in user_prompt
-            follow_up = any(token in user_message for token in ("刚刚", "刚才", "上一轮", "上一个结果", "代码", "准确", "对不对", "讲解", "解释"))
+            last_run_present = '"run_id":"' in user_prompt and '"run_id":""' not in user_prompt
+            recognition_present = "Recognition result" in user_prompt and any(
+                token in user_prompt for token in ('"system":"', '"raw_summary":"', '"labels":[')
+            )
+            follow_up_ref = any(token in user_message for token in ("刚刚", "刚才", "上一轮", "上一个结果", "这张图", "那张图"))
+            follow_up_hint = any(token in user_message for token in ("代码", "准确", "对不对", "讲解", "解释", "流程", "为什么"))
+            html_follow_up = last_run_present and any(
+                token in lowered or token in user_message
+                for token in ("交互式html", "交互式 html", "交互式页面", "interactive html", "result.html", "html文件")
+            )
+            image_html_request = has_image and any(
+                token in lowered or token in user_message
+                for token in ("交互式html", "交互式 html", "交互式页面", "interactive html", "result.html", "html文件")
+            )
             wants_generate = any(token in user_message for token in ("生成", "绘制", "画", "重画", "重新生成")) or "generate" in lowered
             wants_recognition = any(token in user_message for token in ("识别", "截图", "解析")) or "recognize" in lowered
+            wants_image_analysis = any(token in user_message for token in ("相区", "关键点", "坐标轴", "共晶", "phase field", "axis", "label"))
+            wants_generate_from_recognition = recognition_present and wants_generate and any(
+                token in user_message for token in ("识别结果", "对应体系", "这张图", "刚才", "上一轮")
+            )
+            follow_up = not has_image and follow_up_hint and (follow_up_ref or last_run_present or recognition_present) and not wants_generate_from_recognition
+            if has_image and wants_image_analysis and not wants_generate:
+                wants_recognition = True
             wants_lammps = any(token in lowered for token in ("lammps", "md", "molecular dynamics", "模拟", "分子动力学", "nvt", "npt", "eam", "lj", "升温"))
+            lammps_run_request = any(token in user_message for token in ("运行", "执行", "跑", "做一个", "做一轮", "返回", "给我", "模拟一下", "再跑"))
+            lammps_explain_request = wants_lammps and any(
+                token in lowered or token in user_message
+                for token in ("怎么用", "是什么", "区别", "解释", "说明", "报错", "怎么办", "适合", "选择", "推荐", "error", "explain")
+            )
+            if image_html_request:
+                return {
+                    "route_name": "recognition.analyze",
+                    "next_step": "recognition",
+                    "compute_domain": "none",
+                    "intent": "recognize_image_to_interactive_simulator",
+                    "reason": "image to interactive simulator request",
+                    "confidence": 0.93,
+                }
+            if html_follow_up:
+                return {
+                    "route_name": "conversation.answer",
+                    "next_step": "chat",
+                    "compute_domain": "none",
+                    "intent": "rehydrate_previous_phase_html",
+                    "reason": "reopen previous phase html",
+                    "confidence": 0.95,
+                }
             if follow_up:
                 return {
                     "route_name": "conversation.answer",
@@ -167,7 +210,7 @@ class ScriptedLLMClient:
                     "reason": "follow-up request",
                     "confidence": 0.94,
                 }
-            if wants_generate and wants_recognition:
+            if has_image and wants_generate and wants_recognition:
                 return {
                     "route_name": "mixed.request",
                     "next_step": "recognition",
@@ -175,6 +218,15 @@ class ScriptedLLMClient:
                     "intent": "recognize_then_generate",
                     "reason": "image plus generation request",
                     "confidence": 0.92,
+                }
+            if wants_generate_from_recognition:
+                return {
+                    "route_name": "phase_diagram.generate",
+                    "next_step": "compute",
+                    "compute_domain": "phase_diagram",
+                    "intent": "generate_phase_diagram",
+                    "reason": "generate from previous recognition result",
+                    "confidence": 0.91,
                 }
             if wants_recognition:
                 return {
@@ -184,6 +236,15 @@ class ScriptedLLMClient:
                     "intent": "recognize_phase_diagram",
                     "reason": "recognition request",
                     "confidence": 0.91,
+                }
+            if lammps_explain_request and not lammps_run_request:
+                return {
+                    "route_name": "conversation.answer",
+                    "next_step": "chat",
+                    "compute_domain": "none",
+                    "intent": "explain_lammps_or_materials_concept",
+                    "reason": "lammps explanation request",
+                    "confidence": 0.92,
                 }
             if wants_lammps:
                 return {
@@ -309,8 +370,19 @@ class ScriptedLLMClient:
             "diagram_type": "binary",
             "x_axis": {"label": "composition", "minimum": 0, "maximum": 100, "unit": "at.%"},
             "y_axis": {"label": "temperature", "minimum": 300, "maximum": 1000, "unit": "K"},
+            "plot_region": {"left": 0.14, "top": 0.10, "right": 0.88, "bottom": 0.84, "confidence": 0.86},
             "phases": ["Liquid", "FCC_A1", "HCP_A3"],
-            "critical_points": [{"label": "point-1", "composition": 50, "temperature": 700, "notes": "stub"}],
+            "critical_points": [
+                {
+                    "label": "point-1",
+                    "composition": 50,
+                    "temperature": 700,
+                    "x_norm": 0.51,
+                    "y_norm": 0.42,
+                    "confidence": 0.82,
+                    "notes": "stub",
+                }
+            ],
             "labels": ["phase-diagram.png"],
             "confidence": 0.84,
             "raw_summary": f"识别到 {system_name} 二元相图截图。",

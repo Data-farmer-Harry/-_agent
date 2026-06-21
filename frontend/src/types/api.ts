@@ -13,6 +13,44 @@ export interface ConversationTurn {
   content: string
 }
 
+export interface ShortTermMemorySnapshot {
+  conversation_id: string
+  messages: ConversationTurn[]
+  uploaded_assets: UploadedAsset[]
+  recognition_result: RecognitionResult | null
+  last_run_context: LastRunContext
+  session_title: string
+  last_user_message: string
+  message_count: number
+  asset_count: number
+  summary_version: string
+  current_context_summary: string
+  updated_at: string
+}
+
+export interface LongTermMemorySnapshot {
+  conversation_id: string
+  summary_version: string
+  strategic_summary: string
+  salient_facts: string[]
+  research_topics: string[]
+  completed_run_summaries: string[]
+  open_questions: string[]
+  preferred_tools: string[]
+  user_preferences: string[]
+  retrieval_hints: string[]
+  compression_method: string
+  source_message_count: number
+  updated_at: string
+}
+
+export interface ConversationSnapshotResponse {
+  conversation_id: string
+  short_term: ShortTermMemorySnapshot
+  long_term: LongTermMemorySnapshot
+  latest_run: RunRecordSummary | null
+}
+
 export interface LastRunContext {
   run_id: string
   route_name: string
@@ -68,6 +106,7 @@ export interface RecognitionResult {
 }
 
 export interface AgentChatRequest {
+  request_id?: string
   conversation_id: string
   message: string
   system_name: string
@@ -195,16 +234,79 @@ export interface RunListResponse {
   runs: RunRecordSummary[]
 }
 
+export interface AgentJobRecord {
+  job_id: string
+  request_id: string
+  job_type: string
+  status: RunStatus
+  conversation_id: string
+  run_id: string
+  created_at: string
+  updated_at: string
+  started_at: string
+  finished_at: string
+  progress_percent: number | null
+  progress_stage: string
+  progress_message: string
+  request_summary: string
+  result_run_id: string
+  error: string
+  event_count: number
+}
+
+export interface AgentJobListResponse {
+  count: number
+  jobs: AgentJobRecord[]
+}
+
+export interface AgentJobResultResponse {
+  ready: boolean
+  job: AgentJobRecord
+  run: RunRecordSummary | null
+}
+
 export interface LlmRuntimeConfig {
   llm_enabled: boolean
   require_llm_for_agents: boolean
   python_executable: string
   llm_api_base_url: string
   llm_model: string
+  llm_enable_thinking: boolean
+  llm_supports_chat: boolean
+  llm_supports_vision: boolean
+  llm_supports_embedding: boolean
   llm_request_timeout_seconds: number
   llm_request_max_retries: number
   llm_retry_backoff_seconds: number
   llm_max_tokens: number
+  thermo_rag_embedding_backend?: string
+  thermo_rag_embedding_api_base_url?: string
+  thermo_rag_embedding_model?: string
+  thermo_rag_embedding_dimensions?: number
+  thermo_rag_bm25_weight?: number
+  thermo_rag_embedding_api_batch_size?: number
+  thermo_rag_embedding_api_key_set?: boolean
+  thermo_rag_embedding_api_key_masked?: string
+  materials_rag_enabled?: boolean
+  materials_rag_top_k?: number
+  materials_rag_embedding_backend?: string
+  materials_rag_embedding_api_base_url?: string
+  materials_rag_embedding_model?: string
+  materials_rag_embedding_dimensions?: number
+  materials_rag_vector_weight?: number
+  materials_rag_vector_min_similarity?: number
+  materials_rag_bm25_weight?: number
+  materials_rag_embedding_api_batch_size?: number
+  materials_rag_embedding_api_key_set?: boolean
+  materials_rag_embedding_api_key_masked?: string
+  rag_reranker_enabled?: boolean
+  rag_reranker_api_base_url?: string
+  rag_reranker_model?: string
+  rag_reranker_candidate_pool?: number
+  rag_reranker_timeout_seconds?: number
+  rag_reranker_api_key_set?: boolean
+  rag_reranker_api_key_masked?: string
+  rag_vector_store_path?: string
   api_key_set: boolean
   api_key_masked: string
   updated?: boolean

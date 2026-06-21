@@ -18,6 +18,7 @@ from app.state import (
     ToolObservation,
 )
 from app.core.artifacts import ArtifactService
+from app.runtimes.telemetry import build_runtime_execution_profile, initialize_runtime_state
 from app.thermo.codegen import CodeGenerationService
 from app.core.executor import LocalPythonExecutor
 from app.thermo.service import PhaseDiagramAgentService
@@ -307,18 +308,16 @@ class PhaseDiagramRuntime:
             )
         return diagram_request, planning
 
-    def run(
+    def _build_state(
         self,
         *,
         run_id: str,
-        request: AgentChatRequest,
-        recognition_result: RecognitionResult | None = None,
-        decision: dict[str, Any] | None = None,
+        decision: dict[str, Any] | None,
         event_sink=None,
         existing_plan_steps: list[PlanStep] | None = None,
         existing_trace: list[ToolObservation] | None = None,
         existing_artifacts: list[ArtifactRef] | None = None,
-    ) -> AgentRunResponse:
+    ) -> dict[str, Any]:
         route = TaskRoute(
             name="phase_diagram.generate" if (decision or {}).get("route_name") != "mixed.request" else "mixed.request",
             workspace_id="materials_agent",
@@ -329,7 +328,7 @@ class PhaseDiagramRuntime:
             decision_confidence=float((decision or {}).get("confidence")) if (decision or {}).get("confidence") is not None else None,
             compute_domain="phase_diagram",
         )
-        state: dict[str, Any] = {
+        state = {
             "run_id": run_id,
             "route": route,
             "plan_steps": list(existing_plan_steps or []),
@@ -348,8 +347,30 @@ class PhaseDiagramRuntime:
             "current_code_filename": settings.code_file_name,
             "event_sink": event_sink,
         }
+        initialize_runtime_state(
+            state,
+            runtime_name="PhaseDiagramRuntime",
+            capability_tags=[
+                "pycalphad",
+                "tdb_registry",
+                "llm_codegen",
+                "local_python_execute",
+                "review_repair_loop",
+            ],
+        )
+        return state
 
-        diagram_request, planning = self._build_request(request, recognition_result)
+    def _run_with_structured_request(
+        self,
+        *,
+        state: dict[str, Any],
+        request_message: str,
+        conversation_id: str,
+        diagram_request: DiagramRequest,
+        planning: dict[str, Any],
+        recognition_result: RecognitionResult | None = None,
+    ) -> AgentRunResponse:
+        recognition_note = self._recognition_notes(recognition_result) if recognition_result else ""
         state["diagram_request"] = diagram_request
         state["planning"] = planning
         self._record_step(
@@ -360,7 +381,7 @@ class PhaseDiagramRuntime:
                 f"任务已解析为 {diagram_request.system_name} {diagram_request.diagram_type} 相图，"
                 f"温度范围 {diagram_request.temperature_min:.0f}-{diagram_request.temperature_max:.0f} K。"
             ),
-            input_data={"message": request.message},
+            input_data={"message": request_message or diagram_request.system_name},
             output_data={"diagram_request": diagram_request.model_dump(mode="json"), "planning": planning},
             description="Interpret the user request into a structured phase-diagram task.",
             stage="chat_to_request",
@@ -370,9 +391,10 @@ class PhaseDiagramRuntime:
         thermo_query_text = "\n".join(
             part
             for part in (
-                request.message,
+                request_message,
+                diagram_request.system_name,
                 diagram_request.notes,
-                self._recognition_notes(recognition_result) if recognition_result else "",
+                recognition_note,
             )
             if part and part.strip()
         )
@@ -398,7 +420,7 @@ class PhaseDiagramRuntime:
                 success=False,
                 final_message="这次没有进入真实热力学计算，因为当前 registry 里还没有这个体系对应的 TDB 文件。我已保留 trace，方便继续补库。",
                 termination_reason="thermo_database_not_found",
-                conversation_id=request.conversation_id,
+                conversation_id=conversation_id,
                 recognition_result=recognition_result,
             )
 
@@ -438,8 +460,8 @@ class PhaseDiagramRuntime:
                 code_artifact = self.artifact_service.build_artifact_ref(
                     kind="code",
                     name=code_artifact_name,
-                    path=self.artifact_service.get_code_path(run_id, code_artifact_name),
-                    url=self.artifact_service.build_artifact_url(run_id, code_artifact_name),
+                    path=self.artifact_service.get_code_path(state["run_id"], code_artifact_name),
+                    url=self.artifact_service.build_artifact_url(state["run_id"], code_artifact_name),
                     content=generated_code,
                     metadata={"generation_source": generation_source, "attempt": codegen_attempt},
                 )
@@ -472,7 +494,7 @@ class PhaseDiagramRuntime:
 
             while repair_attempt <= max_repair_attempts:
                 result = self.executor.execute(
-                    run_id=run_id,
+                    run_id=state["run_id"],
                     code=state["generated_code"],
                     code_filename=state.get("current_code_filename"),
                 )
@@ -487,7 +509,7 @@ class PhaseDiagramRuntime:
                             kind="html",
                             name="result.html",
                             path=result.html_path,
-                            url=self.artifact_service.build_artifact_url(run_id, "result.html"),
+                            url=self.artifact_service.build_artifact_url(state["run_id"], "result.html"),
                             metadata={"success": result.success},
                         )
                     )
@@ -497,7 +519,7 @@ class PhaseDiagramRuntime:
                     tool_name="python_execute",
                     success=result.success,
                     summary="本地 Python 已执行完成，准备进入自检。" if result.success else "本地 Python 执行失败，准备进入修复。",
-                    input_data={"run_id": run_id},
+                    input_data={"run_id": state["run_id"]},
                     output_data={"stdout": result.stdout[:1200], "stderr": result.stderr[:1200], "html_path": result.html_path},
                     description="Execute the generated Python wrapper locally.",
                     stage=f"execute_after_codegen_{codegen_attempt}",
@@ -526,8 +548,8 @@ class PhaseDiagramRuntime:
                     repair_artifact = self.artifact_service.build_artifact_ref(
                         kind="code",
                         name=repair_artifact_name,
-                        path=self.artifact_service.get_code_path(run_id, repair_artifact_name),
-                        url=self.artifact_service.build_artifact_url(run_id, repair_artifact_name),
+                        path=self.artifact_service.get_code_path(state["run_id"], repair_artifact_name),
+                        url=self.artifact_service.build_artifact_url(state["run_id"], repair_artifact_name),
                         content=repaired,
                         metadata={"repair_attempt": repair_attempt},
                     )
@@ -567,7 +589,7 @@ class PhaseDiagramRuntime:
                     tool_name="phase_diagram_result_review",
                     success=bool(review.get("passed")),
                     summary=str(review.get("summary") or ""),
-                    input_data={"run_id": run_id},
+                    input_data={"run_id": state["run_id"]},
                     output_data={
                         "review_passed": bool(review.get("passed")),
                         "review_confidence": review.get("confidence"),
@@ -587,7 +609,7 @@ class PhaseDiagramRuntime:
                         success=True,
                         final_message=self._success_message(state.get("generation_source", "")),
                         termination_reason="review_passed",
-                        conversation_id=request.conversation_id,
+                        conversation_id=conversation_id,
                         recognition_result=recognition_result,
                     )
 
@@ -610,8 +632,8 @@ class PhaseDiagramRuntime:
                 repair_artifact = self.artifact_service.build_artifact_ref(
                     kind="code",
                     name=repair_artifact_name,
-                    path=self.artifact_service.get_code_path(run_id, repair_artifact_name),
-                    url=self.artifact_service.build_artifact_url(run_id, repair_artifact_name),
+                    path=self.artifact_service.get_code_path(state["run_id"], repair_artifact_name),
+                    url=self.artifact_service.build_artifact_url(state["run_id"], repair_artifact_name),
                     content=repaired,
                     metadata={"repair_attempt": repair_attempt},
                 )
@@ -633,7 +655,77 @@ class PhaseDiagramRuntime:
             success=False,
             final_message="这次相图没有通过完整自检，我已保留代码、trace 和错误信息，方便继续修复。",
             termination_reason="review_failed",
+            conversation_id=conversation_id,
+            recognition_result=recognition_result,
+        )
+
+    def run(
+        self,
+        *,
+        run_id: str,
+        request: AgentChatRequest,
+        recognition_result: RecognitionResult | None = None,
+        decision: dict[str, Any] | None = None,
+        event_sink=None,
+        existing_plan_steps: list[PlanStep] | None = None,
+        existing_trace: list[ToolObservation] | None = None,
+        existing_artifacts: list[ArtifactRef] | None = None,
+    ) -> AgentRunResponse:
+        state = self._build_state(
+            run_id=run_id,
+            decision=decision,
+            event_sink=event_sink,
+            existing_plan_steps=existing_plan_steps,
+            existing_trace=existing_trace,
+            existing_artifacts=existing_artifacts,
+        )
+        diagram_request, planning = self._build_request(request, recognition_result)
+        return self._run_with_structured_request(
+            state=state,
+            request_message=request.message,
             conversation_id=request.conversation_id,
+            diagram_request=diagram_request,
+            planning=planning,
+            recognition_result=recognition_result,
+        )
+
+    def run_structured(
+        self,
+        *,
+        run_id: str,
+        diagram_request: DiagramRequest | dict[str, Any],
+        conversation_id: str = "mcp-phase-diagram-structured",
+        request_message: str = "",
+        recognition_result: RecognitionResult | None = None,
+        decision: dict[str, Any] | None = None,
+        event_sink=None,
+        existing_plan_steps: list[PlanStep] | None = None,
+        existing_trace: list[ToolObservation] | None = None,
+        existing_artifacts: list[ArtifactRef] | None = None,
+    ) -> AgentRunResponse:
+        state = self._build_state(
+            run_id=run_id,
+            decision=decision,
+            event_sink=event_sink,
+            existing_plan_steps=existing_plan_steps,
+            existing_trace=existing_trace,
+            existing_artifacts=existing_artifacts,
+        )
+        structured_request = (
+            diagram_request if isinstance(diagram_request, DiagramRequest) else DiagramRequest.model_validate(diagram_request)
+        )
+        planning = {
+            "source": "structured_request",
+            "message": request_message,
+            "llm_confidence": 1.0,
+            "selection_mode": "direct_structured_execute",
+        }
+        return self._run_with_structured_request(
+            state=state,
+            request_message=request_message,
+            conversation_id=conversation_id,
+            diagram_request=structured_request,
+            planning=planning,
             recognition_result=recognition_result,
         )
 
@@ -647,6 +739,13 @@ class PhaseDiagramRuntime:
         conversation_id: str,
         recognition_result: RecognitionResult | None,
     ) -> AgentRunResponse:
+        result_profile = self._build_result_profile(state, success)
+        runtime_profile = build_runtime_execution_profile(
+            state,
+            success=success,
+            termination_reason=termination_reason,
+            result_profile=result_profile,
+        )
         trace_model = RunTrace(
             run_id=state["run_id"],
             route=state["route"],
@@ -659,6 +758,7 @@ class PhaseDiagramRuntime:
                 "generation_source": state.get("generation_source", ""),
                 "review": state.get("review", {}),
                 "accuracy": state.get("accuracy", {}),
+                "runtime_profile": runtime_profile,
             },
         )
         trace_path = self.artifact_service.write_trace(trace_model)
@@ -669,7 +769,6 @@ class PhaseDiagramRuntime:
             url=self.artifact_service.build_artifact_url(state["run_id"], "trace.json"),
         )
         artifacts = self._merge_artifacts(state["artifacts"], [trace_artifact])
-        result_profile = self._build_result_profile(state, success)
         summary = {
             "system_name": state["diagram_request"].system_name,
             "diagram_type": state["diagram_request"].diagram_type,
@@ -679,6 +778,7 @@ class PhaseDiagramRuntime:
             "review": state.get("review", {}),
             "planning": state.get("planning", {}),
             "result_profile": result_profile,
+            "runtime_profile": runtime_profile,
         }
         response = AgentRunResponse(
             success=success,
@@ -702,6 +802,7 @@ class PhaseDiagramRuntime:
                 "review": state.get("review", {}),
                 "accuracy": state.get("accuracy", {}),
                 "result_profile": result_profile,
+                "runtime_profile": runtime_profile,
             },
             recognition_result=recognition_result,
             current_context_summary="",

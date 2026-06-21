@@ -1,8 +1,11 @@
 import type {
   AgentChatRequest,
+  AgentJobRecord,
+  AgentJobResultResponse,
   AgentRunResponse,
   AgentStreamEvent,
   ClientSettings,
+  ConversationSnapshotResponse,
   HealthResponse,
   LammpsRuntimeConfig,
   LlmRuntimeConfig,
@@ -101,6 +104,33 @@ export async function runAgentChat(settings: ClientSettings, payload: AgentChatR
   )
 }
 
+export async function submitAgentChatJob(settings: ClientSettings, payload: AgentChatRequest): Promise<AgentJobRecord> {
+  return requestJson<AgentJobRecord>(
+    buildUrl(settings.apiBaseUrl, '/api/jobs/agent-chat'),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+    Math.min(settings.requestTimeoutMs, 15000),
+  )
+}
+
+export async function getAgentJobResult(settings: ClientSettings, jobId: string): Promise<AgentJobResultResponse> {
+  return requestJson<AgentJobResultResponse>(
+    buildUrl(settings.apiBaseUrl, `/api/jobs/${jobId}/result`),
+    { method: 'GET' },
+    Math.min(settings.requestTimeoutMs, 15000),
+  )
+}
+
+export async function cancelJobRequest(settings: ClientSettings, jobId: string): Promise<AgentJobRecord> {
+  return requestJson<AgentJobRecord>(
+    buildUrl(settings.apiBaseUrl, `/api/jobs/${jobId}/cancel`),
+    { method: 'POST' },
+    Math.min(settings.requestTimeoutMs, 15000),
+  )
+}
+
 export async function requestPromptSuggestion(
   settings: ClientSettings,
   payload: PromptSuggestionRequest,
@@ -178,6 +208,14 @@ export async function deleteConversationRequest(
   )
 }
 
+export async function getConversationSnapshot(settings: ClientSettings, conversationId: string): Promise<ConversationSnapshotResponse> {
+  return requestJson<ConversationSnapshotResponse>(
+    buildUrl(settings.apiBaseUrl, `/api/conversations/${conversationId}`),
+    { method: 'GET' },
+    settings.requestTimeoutMs,
+  )
+}
+
 export async function cancelRunRequest(settings: ClientSettings, runId: string): Promise<{ run_id: string; status: string }> {
   return requestJson<{ run_id: string; status: string }>(
     buildUrl(settings.apiBaseUrl, `/api/runs/${runId}/cancel`),
@@ -249,5 +287,57 @@ export async function streamAgentChat(
       throw error
     }
     throw new Error('流式请求失败。')
+  }
+}
+
+export async function streamAgentChatJob(
+  settings: ClientSettings,
+  jobId: string,
+  onEvent: (event: AgentStreamEvent) => void,
+): Promise<void> {
+  try {
+    const response = await fetch(buildUrl(settings.apiBaseUrl, `/api/jobs/${jobId}/events`), {
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const message = await response.text()
+      throw new Error(message || `HTTP ${response.status}`)
+    }
+
+    if (!response.body) {
+      throw new Error('Job 流式响应不可用。')
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+
+      buffer += decoder.decode(value, { stream: true })
+      const chunks = buffer.split('\n\n')
+      buffer = chunks.pop() || ''
+
+      for (const chunk of chunks) {
+        const lines = chunk.split('\n')
+        const eventLine = lines.find((line) => line.startsWith('event: '))
+        const dataLine = lines.find((line) => line.startsWith('data: '))
+        if (!eventLine || !dataLine) {
+          continue
+        }
+        const parsed = JSON.parse(dataLine.slice(6)) as AgentStreamEvent
+        onEvent({ ...parsed, type: eventLine.slice(7) as AgentStreamEvent['type'] })
+      }
+    }
+  } catch (error) {
+    if (error instanceof Error) {
+      throw error
+    }
+    throw new Error('Job 流式请求失败。')
   }
 }

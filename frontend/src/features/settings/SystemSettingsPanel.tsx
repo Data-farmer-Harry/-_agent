@@ -48,6 +48,23 @@ function diagnosticPill(status: 'ok' | 'warning' | 'error' | 'unknown') {
   return 'bg-slate-100 text-slate-600 border-slate-200'
 }
 
+function diagnosticLabel(status: 'ok' | 'warning' | 'error' | 'unknown') {
+  if (status === 'ok') return '正常'
+  if (status === 'warning') return '警告'
+  if (status === 'error') return '阻塞'
+  return '未知'
+}
+
+function compactValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.length > 6 ? `${value.slice(0, 6).join(', ')} 等 ${value.length} 项` : value.join(', ')
+  }
+  if (typeof value === 'object' && value !== null) {
+    return JSON.stringify(value)
+  }
+  return String(value)
+}
+
 export function SystemSettingsPanel({
   open,
   settings,
@@ -110,6 +127,16 @@ export function SystemSettingsPanel({
     }
     return '连接中'
   }, [connectionStatus])
+
+  const diagnosticSummary = useMemo(() => {
+    const checks = diagnostics?.checks || []
+    return {
+      ok: checks.filter((check) => check.status === 'ok').length,
+      warning: checks.filter((check) => check.status === 'warning').length,
+      error: checks.filter((check) => check.status === 'error').length,
+      total: checks.length,
+    }
+  }, [diagnostics])
 
   if (!open) {
     return null
@@ -204,21 +231,47 @@ export function SystemSettingsPanel({
             <section className="rounded-2xl border border-slate-200 bg-white p-5">
               <div className="mb-4 flex items-center justify-between gap-4">
                 <div>
-                  <h3 className="text-sm font-semibold text-slate-900">环境诊断</h3>
-                  <p className="text-xs text-slate-500">用于快速检查 LLM、Python、LAMMPS、OVITO 和热力学数据库是否真的可用。</p>
+                  <h3 className="text-sm font-semibold text-slate-900">系统健康检查</h3>
+                  <p className="text-xs text-slate-500">一键检查配置中心、LLM/视觉、embedding、RAG、LAMMPS、OVITO、SQLite、artifact 和 benchmark。</p>
                 </div>
-                {diagnostics ? (
-                  <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${diagnosticPill(diagnostics.overall_status)}`}>
-                    {diagnostics.overall_status === 'ok' ? '诊断通过' : diagnostics.overall_status === 'warning' ? '存在警告' : '存在阻塞问题'}
-                  </span>
-                ) : null}
+                <button
+                  onClick={() => void getSystemDiagnostics(settings).then((nextDiagnostics) => {
+                    setDiagnostics(nextDiagnostics)
+                    setFeedback('系统健康检查已完成。')
+                  }).catch((error) => {
+                    setFeedback(error instanceof Error ? error.message : '系统健康检查失败。')
+                  })}
+                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                  data-testid="system-health-check-button"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  立即检查
+                </button>
               </div>
               {loading && !diagnostics ? (
                 <div className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> 正在检测本地环境…</div>
               ) : diagnostics ? (
                 <div className="space-y-3">
+                  <div className="grid grid-cols-4 gap-2" data-testid="system-health-summary">
+                    <div className={`rounded-2xl border px-3 py-3 ${diagnosticPill(diagnostics.overall_status)}`}>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] opacity-70">Overall</p>
+                      <p className="mt-1 text-sm font-bold">{diagnosticLabel(diagnostics.overall_status)}</p>
+                    </div>
+                    <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-3 py-3 text-emerald-700">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] opacity-70">OK</p>
+                      <p className="mt-1 text-sm font-bold">{diagnosticSummary.ok}/{diagnosticSummary.total}</p>
+                    </div>
+                    <div className="rounded-2xl border border-amber-100 bg-amber-50 px-3 py-3 text-amber-700">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] opacity-70">Warn</p>
+                      <p className="mt-1 text-sm font-bold">{diagnosticSummary.warning}</p>
+                    </div>
+                    <div className="rounded-2xl border border-rose-100 bg-rose-50 px-3 py-3 text-rose-700">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] opacity-70">Error</p>
+                      <p className="mt-1 text-sm font-bold">{diagnosticSummary.error}</p>
+                    </div>
+                  </div>
                   {diagnostics.checks.map((check) => (
-                    <div key={check.name} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div key={check.name} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3" data-testid="system-health-check-card">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
@@ -238,16 +291,17 @@ export function SystemSettingsPanel({
                         </span>
                       </div>
                       {Object.keys(check.details || {}).length > 0 ? (
-                        <div className="mt-3 grid gap-2 rounded-xl border border-slate-200 bg-white p-3 text-[11px] text-slate-500">
+                        <details className="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-[11px] text-slate-500">
+                          <summary className="cursor-pointer font-semibold text-slate-500">查看诊断细节</summary>
+                          <div className="mt-3 grid gap-2">
                           {Object.entries(check.details).map(([key, value]) => (
                             <div key={key} className="grid grid-cols-[120px_minmax(0,1fr)] gap-3">
                               <span className="font-semibold uppercase tracking-[0.16em] text-slate-400">{key}</span>
-                              <span className="break-all text-slate-600">
-                                {Array.isArray(value) ? value.join(', ') : typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value)}
-                              </span>
+                              <span className="break-all text-slate-600">{compactValue(value)}</span>
                             </div>
                           ))}
-                        </div>
+                          </div>
+                        </details>
                       ) : null}
                     </div>
                   ))}
@@ -319,6 +373,28 @@ export function SystemSettingsPanel({
                     <span>所有 agent 必须真实调用 LLM</span>
                     <input type="checkbox" checked={llmConfig.require_llm_for_agents} onChange={(event) => setLlmConfig({ ...llmConfig, require_llm_for_agents: event.target.checked })} />
                   </label>
+                  <label className={checkboxLabelClassName()}>
+                    <span>关闭模型思考模式</span>
+                    <input type="checkbox" checked={!llmConfig.llm_enable_thinking} onChange={(event) => setLlmConfig({ ...llmConfig, llm_enable_thinking: !event.target.checked })} />
+                  </label>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="mb-2 text-xs font-semibold text-slate-700">模型能力声明</p>
+                    <p className="mb-3 text-[11px] leading-5 text-slate-500">健康检查按这里的声明判断能力，不会再因为仅配置了 API Key 就误判视觉或原生 embedding 可用。</p>
+                    <div className="grid gap-2">
+                      <label className={checkboxLabelClassName()}>
+                        <span>支持文本对话</span>
+                        <input type="checkbox" checked={llmConfig.llm_supports_chat} onChange={(event) => setLlmConfig({ ...llmConfig, llm_supports_chat: event.target.checked })} />
+                      </label>
+                      <label className={checkboxLabelClassName()}>
+                        <span>支持图片 / 视觉输入</span>
+                        <input type="checkbox" checked={llmConfig.llm_supports_vision} onChange={(event) => setLlmConfig({ ...llmConfig, llm_supports_vision: event.target.checked })} />
+                      </label>
+                      <label className={checkboxLabelClassName()}>
+                        <span>聊天模型原生支持 embedding</span>
+                        <input type="checkbox" checked={llmConfig.llm_supports_embedding} onChange={(event) => setLlmConfig({ ...llmConfig, llm_supports_embedding: event.target.checked })} />
+                      </label>
+                    </div>
+                  </div>
                   <SettingField label="Python 可执行文件" description="相图 wrapper 会通过这个 Python 路径执行。Windows 上可改为 venv 中的 python.exe。">
                     <input className={inputClassName()} value={llmConfig.python_executable} onChange={(event) => setLlmConfig({ ...llmConfig, python_executable: event.target.value })} />
                   </SettingField>

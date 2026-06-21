@@ -1,0 +1,23 @@
+{
+  "benchmark_version": "2026-04-09-v2",
+  "dataset_count": 11,
+  "cases_total": 71,
+  "datasets": {
+    "routing_cases": 10,
+    "phase_parsing_cases": 6,
+    "lammps_parsing_cases": 4,
+    "phase_execution_cases": 29,
+    "lammps_contract_cases": 3,
+    "lammps_e2e_cases": 3,
+    "recognition_cases": 3,
+    "external_recognition_cases": 4,
+    "memory_followup_cases": 2,
+    "memory_retrieval_cases": 1,
+    "mcp_cases": 6
+  },
+  "supported_lammps_materials": [
+    "Al",
+    "Cu",
+    "Ni"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "conversation_id": "chat-60f92397",
+  "summary_version": "v1",
+  "strategic_summary": "用户询问共析点与包晶反应的区别。共析点为固定成分下单一固相在恒温分解为两固相的临界点。材料相变基础概念研究需求。",
+  "salient_facts": [
+    "recent_user=什么是共析点，它和包晶反应有什么区别？"
+  ],
+  "research_topics": [],
+  "completed_run_summaries": [],
+  "open_questions": [
+    "什么是共析点，它和包晶反应有什么区别？"
+  ],
+  "preferred_tools": [],
+  "user_preferences": [],
+  "retrieval_hints": [],
+  "compression_method": "llm_compaction",
+  "source_message_count": 2,
+  "updated_at": "2026-04-05T13:23:01.619533+00:00"
+}

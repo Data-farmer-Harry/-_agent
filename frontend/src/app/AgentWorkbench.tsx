@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Settings, Plus, ChevronRight, Share2, BookOpen, GitBranch, MessageSquare, Trash2 } from 'lucide-react';
 import { AgentConversationPanel } from '../features/chat/AgentConversationPanel';
 import { TracePanel } from '../features/trace/TracePanel';
@@ -7,6 +7,49 @@ import { SystemSettingsPanel } from '../features/settings/SystemSettingsPanel';
 import { useLocalSettings } from '../features/settings/useLocalSettings';
 import { deleteConversationRequest, requestPromptSuggestion } from '../services/api';
 import type { AgentChatRequest, RunRecordSummary } from '../types/api';
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error(`Failed to read ${file.name} as a data URL.`));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`Failed to read ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function fileIdentity(file: File): string {
+  return `${file.name || 'unnamed'}::${file.type || 'application/octet-stream'}::${file.size}::${file.lastModified}`
+}
+
+function mergeUniqueFiles(existing: File[], incoming: File[]): File[] {
+  const next = [...existing]
+  const seen = new Set(existing.map(fileIdentity))
+  for (const file of incoming) {
+    const identity = fileIdentity(file)
+    if (seen.has(identity)) {
+      continue
+    }
+    next.push(file)
+    seen.add(identity)
+  }
+  return next
+}
+
+function buildAutoMultimodalPrompt(files: File[]): string {
+  const imageCount = files.filter((file) => file.type.startsWith('image/')).length
+  if (imageCount > 0) {
+    return imageCount === 1
+      ? '请识别并讲解这张上传图片的内容，优先提取文字、关键对象，以及与材料或相图相关的信息。'
+      : '请逐张识别并讲解这些上传图片的内容，优先提取文字、关键对象，以及与材料或相图相关的信息。'
+  }
+  return '请结合我上传的附件进行识别和讲解，先概括内容，再提取关键信息。'
+}
 
 function truncateLabel(value: string, maxLength = 34): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
@@ -121,9 +164,28 @@ export function AgentWorkbench() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const conversationGroups = useMemo(() => buildConversationGroups(runHistory), [runHistory]);
 
-  const handleSend = (manualPrompt?: string) => {
-    const text = manualPrompt || draftMessage;
+  const handleFilesAdded = useCallback((files: File[]) => {
+    setUploadedAssets((current) => mergeUniqueFiles(current, files))
+  }, [])
+
+  const handleRemoveAsset = useCallback((assetId: string) => {
+    setUploadedAssets((current) => current.filter((file) => fileIdentity(file) !== assetId))
+  }, [])
+
+  const handleSend = async (manualPrompt?: string) => {
+    const typedText = manualPrompt ?? draftMessage
+    const text = typedText.trim() ? typedText : uploadedAssets.length > 0 ? buildAutoMultimodalPrompt(uploadedAssets) : ''
     if (!text.trim() && uploadedAssets.length === 0) return;
+
+    const encodedAssets = await Promise.all(
+      uploadedAssets.map(async (file) => ({
+        asset_id: fileIdentity(file),
+        name: file.name,
+        media_type: file.type,
+        data_url: await readFileAsDataUrl(file),
+        size_bytes: file.size,
+      })),
+    );
 
     const request: AgentChatRequest = {
       conversation_id: state.conversationId,
@@ -135,13 +197,7 @@ export function AgentWorkbench() {
       pressure: 101325,
       step_size: 10,
       notes: '',
-      uploaded_assets: uploadedAssets.map((f, i) => ({
-        asset_id: `local-${i}`,
-        name: f.name,
-        media_type: f.type,
-        data_url: '', // Data conversion logic omitted for simplicity unless needed
-        size_bytes: f.size
-      })),
+      uploaded_assets: encodedAssets,
       conversation_history: [],
       last_run_context: {
         run_id: '',
@@ -425,13 +481,13 @@ export function AgentWorkbench() {
             showLiveStatus={state.isLoading}
             liveProgress={liveProgress}
             draftMessage={draftMessage}
-            uploadedAssets={uploadedAssets.map((f, i) => ({ asset_id: `local-${i}`, name: f.name, media_type: f.type, data_url: '', size_bytes: f.size }))}
+            uploadedAssets={uploadedAssets.map((file) => ({ asset_id: fileIdentity(file), name: file.name, media_type: file.type, data_url: '', size_bytes: file.size }))}
             disabled={state.isLoading}
             connectionMessage={apiConnection.message}
             connectionStatus={apiConnection.status}
             onDraftMessageChange={setDraftMessage}
-            onFilesAdded={(files) => setUploadedAssets([...uploadedAssets, ...files])}
-            onRemoveAsset={() => {}}
+            onFilesAdded={handleFilesAdded}
+            onRemoveAsset={handleRemoveAsset}
             onSend={handleSend}
             onAiAnalyze={handleAiAnalyze}
             onRequestPromptSuggestion={handleRequestPromptSuggestion}

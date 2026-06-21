@@ -1,0 +1,19 @@
+{
+  "conversation_id": "bench-routing-51e807cb",
+  "summary_version": "v1",
+  "strategic_summary": "用户询问图像准确性，当前为对话模式。需关注材料研究体系、验证性实验数据及待解决问题。",
+  "salient_facts": [
+    "recent_user=这张图准确吗？"
+  ],
+  "research_topics": [],
+  "completed_run_summaries": [],
+  "open_questions": [
+    "这张图准确吗？"
+  ],
+  "preferred_tools": [],
+  "user_preferences": [],
+  "retrieval_hints": [],
+  "compression_method": "llm_compaction",
+  "source_message_count": 2,
+  "updated_at": "2026-04-07T12:18:18.720274+00:00"
+}

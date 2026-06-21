@@ -30,6 +30,25 @@ function readMetrics(summary: Record<string, unknown>): Record<string, unknown> 
   return metrics && typeof metrics === 'object' ? (metrics as Record<string, unknown>) : {}
 }
 
+function readMaterialsRag(payload: Record<string, unknown>): {
+  planningHits: Array<Record<string, unknown>>
+  errorHits: Array<Record<string, unknown>>
+  material: string
+} {
+  const rag = payload.materials_rag && typeof payload.materials_rag === 'object' ? (payload.materials_rag as Record<string, unknown>) : {}
+  const planning = rag.planning && typeof rag.planning === 'object' ? (rag.planning as Record<string, unknown>) : {}
+  const errorDiagnosis = rag.error_diagnosis && typeof rag.error_diagnosis === 'object' ? (rag.error_diagnosis as Record<string, unknown>) : {}
+  return {
+    planningHits: Array.isArray(planning.hits) ? (planning.hits as Array<Record<string, unknown>>) : [],
+    errorHits: Array.isArray(errorDiagnosis.hits) ? (errorDiagnosis.hits as Array<Record<string, unknown>>) : [],
+    material: typeof planning.material === 'string' ? planning.material : '',
+  }
+}
+
+function formatScore(value: unknown): string {
+  return typeof value === 'number' ? value.toFixed(3) : '—'
+}
+
 export function TracePanel({
   runId,
   route,
@@ -50,6 +69,7 @@ export function TracePanel({
   const toolInvoked = routeName !== 'conversation.answer' && routeName !== 'awaiting'
   const computeDomain = route?.compute_domain || 'none'
   const metrics = readMetrics(summary)
+  const lammpsRag = readMaterialsRag(responseMetadata)
   const modeLabel =
     routeName === 'recognition.analyze'
       ? 'recognition'
@@ -196,6 +216,34 @@ export function TracePanel({
                 {Object.entries(metrics).map(([key, value]) => (
                   <li key={key}>
                     {key}: {typeof value === 'number' ? value.toFixed(3) : String(value)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {routeName === 'lammps.generate' && (lammpsRag.planningHits.length || lammpsRag.errorHits.length) ? (
+            <div className="trace-block">
+              <div className="trace-block-header">
+                <h4>LAMMPS RAG Evidence</h4>
+                <span>{lammpsRag.planningHits.length + lammpsRag.errorHits.length}</span>
+              </div>
+              {lammpsRag.material ? <p className="trace-note">material hint: {lammpsRag.material}</p> : null}
+              <ul className="trace-list">
+                {[...lammpsRag.planningHits.slice(0, 4), ...lammpsRag.errorHits.slice(0, 3)].map((hit, index) => (
+                  <li key={`${String(hit.title || 'rag')}-${index}`} className="trace-item trace-item-completed">
+                    <div className="trace-item-topline">
+                      <strong>{String(hit.title || 'Untitled knowledge card')}</strong>
+                      <span>{formatScore(hit.score)}</span>
+                    </div>
+                    <p>
+                      {String(hit.doc_type || 'knowledge')} · lexical {formatScore(hit.lexical_score)} · bm25 {formatScore(hit.bm25_score)} · vector {formatScore(hit.vector_score)}
+                    </p>
+                    {hit.source_url ? (
+                      <a className="trace-note" href={String(hit.source_url)} target="_blank" rel="noreferrer">
+                        {String(hit.source || hit.source_url)}
+                      </a>
+                    ) : null}
                   </li>
                 ))}
               </ul>

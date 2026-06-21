@@ -8,7 +8,9 @@ from app.agents.chat import ChatAgent
 from app.agents.compute import ComputeAgent
 from app.memory import MemoryStore
 from app.agents.recognition import RecognitionAgent
+from app.core.agent_protocol import build_agent_envelope, summarize_protocol_messages
 from app.core.llm import LLMRequiredError
+from app.core.observability import log_event, new_request_id
 from app.state import (
     AgentChatRequest,
     AgentGraphState,
@@ -16,8 +18,10 @@ from app.state import (
     AgentStreamEvent,
     ArtifactRef,
     ConversationTurn,
+    LastRunContext,
     MemorySnapshot,
     PlanStep,
+    RunRecordSummary,
     TaskRoute,
     ToolObservation,
 )
@@ -62,6 +66,20 @@ class AgentAppGraph:
         description: str,
         stage: str,
     ) -> dict[str, Any]:
+        envelope = build_agent_envelope(
+            run_id=state["run_id"],
+            conversation_id=state.get("conversation_id", "default"),
+            sender=tool_name,
+            receiver="AgentGraph",
+            message_type=f"{stage}.observation",
+            payload_schema=f"{tool_name}.{stage}.v1",
+            payload={
+                "input": input_data,
+                "output": output_data,
+                "success": success,
+                "summary": summary,
+            },
+        )
         step_index = len(state.get("plan_steps", [])) + 1
         step = PlanStep(
             index=step_index,
@@ -74,7 +92,21 @@ class AgentAppGraph:
         )
         self._emit(
             state,
-            AgentStreamEvent(type="step_started", run_id=state["run_id"], payload={"plan_step": step.model_dump(mode="json")}),
+            AgentStreamEvent(
+                type="step_started",
+                run_id=state["run_id"],
+                payload={"plan_step": step.model_dump(mode="json"), "request_id": state.get("request_id", "")},
+            ),
+        )
+        log_event(
+            "agent.step_started",
+            request_id=state.get("request_id", ""),
+            run_id=state["run_id"],
+            conversation_id=state.get("conversation_id", "default"),
+            message=description,
+            tool_name=tool_name,
+            step_index=step_index,
+            stage=stage,
         )
         final_step = step.model_copy(update={"status": "completed" if success else "failed"})
         observation = ToolObservation(
@@ -85,6 +117,7 @@ class AgentAppGraph:
             input=input_data,
             output=output_data,
             artifacts=[],
+            metadata={"agent_protocol": envelope.public_metadata()},
         )
         plan_steps = [*state.get("plan_steps", []), final_step]
         trace = [*state.get("trace", []), observation]
@@ -93,13 +126,125 @@ class AgentAppGraph:
             AgentStreamEvent(
                 type="step_completed" if success else "step_failed",
                 run_id=state["run_id"],
-                payload={"plan_step": final_step.model_dump(mode="json"), "observation": observation.model_dump(mode="json")},
+                payload={
+                    "plan_step": final_step.model_dump(mode="json"),
+                    "observation": observation.model_dump(mode="json"),
+                    "request_id": state.get("request_id", ""),
+                },
             ),
         )
-        return {"plan_steps": plan_steps, "trace": trace}
+        log_event(
+            "agent.step_completed" if success else "agent.step_failed",
+            level="info" if success else "warning",
+            request_id=state.get("request_id", ""),
+            run_id=state["run_id"],
+            conversation_id=state.get("conversation_id", "default"),
+            message=summary,
+            tool_name=tool_name,
+            step_index=step_index,
+            stage=stage,
+            success=success,
+        )
+        return {
+            "plan_steps": plan_steps,
+            "trace": trace,
+            "protocol_messages": [*state.get("protocol_messages", []), envelope],
+        }
+
+    @staticmethod
+    def _is_actionable_last_run_context(context: LastRunContext | None) -> bool:
+        if context is None or not context.run_id:
+            return False
+        if context.compute_domain in {"phase_diagram", "lammps"}:
+            return True
+        return context.route_name in {"recognition.analyze", "mixed.request"}
+
+    @staticmethod
+    def _request_summary_from_record(record: RunRecordSummary) -> str:
+        summary = record.summary if isinstance(record.summary, dict) else {}
+        if record.route.compute_domain == "phase_diagram" or record.route.name in {"phase_diagram.generate", "mixed.request"}:
+            system_name = str(summary.get("system_name") or "").strip()
+            diagram_type = str(summary.get("diagram_type") or "").strip()
+            temperature_range = summary.get("temperature_range")
+            if (
+                isinstance(temperature_range, (list, tuple))
+                and len(temperature_range) >= 2
+                and system_name
+            ):
+                low, high = temperature_range[0], temperature_range[1]
+                return f"{system_name} {diagram_type} {low}-{high} K".strip()
+            if system_name:
+                return " ".join(part for part in [system_name, diagram_type] if part).strip()
+
+        request_message = str(summary.get("request_message") or "").strip()
+        return request_message[:240]
+
+    @classmethod
+    def _last_run_context_from_record(cls, record: RunRecordSummary) -> LastRunContext:
+        summary = record.summary if isinstance(record.summary, dict) else {}
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        review = metadata.get("review") if isinstance(metadata.get("review"), dict) else {}
+        compute_domain = str(record.route.compute_domain or "none")
+        if compute_domain not in {"phase_diagram", "lammps", "none"}:
+            compute_domain = "none"
+        if compute_domain == "none":
+            if record.route.name in {"phase_diagram.generate", "mixed.request"}:
+                compute_domain = "phase_diagram"
+            elif record.route.name == "lammps.generate":
+                compute_domain = "lammps"
+        return LastRunContext(
+            run_id=record.run_id,
+            route_name=record.route.name,
+            compute_domain=compute_domain,
+            system_name=str(summary.get("system_name") or ""),
+            final_message=record.final_message[:1200],
+            generated_code_preview="",
+            review_summary=str(review.get("summary") or ""),
+            selected_tool=record.route.selected_tool or "",
+            generation_source=str(metadata.get("generation_source") or summary.get("generation_source") or metadata.get("run_mode") or ""),
+            request_summary=cls._request_summary_from_record(record),
+            review_passed=review.get("passed") if isinstance(review.get("passed"), bool) else None,
+            review_issues=[str(item) for item in review.get("issues", [])] if isinstance(review.get("issues"), list) else [],
+            review_advisory_issues=[str(item) for item in review.get("advisory_issues", [])]
+            if isinstance(review.get("advisory_issues"), list)
+            else [],
+            trace_summary=[f"{item.tool_name}: {item.summary}" for item in record.trace[-8:]],
+            recognition_summary="",
+            artifact_names=[artifact.name for artifact in record.artifacts],
+        )
+
+    def _resolve_last_run_context(
+        self,
+        *,
+        conversation_id: str,
+        request_context: LastRunContext,
+        snapshot_context: LastRunContext,
+    ) -> LastRunContext:
+        if self._is_actionable_last_run_context(request_context):
+            return request_context
+        if self._is_actionable_last_run_context(snapshot_context):
+            return snapshot_context
+
+        for record in self.artifact_service.list_run_summaries(limit=200):
+            if record.conversation_id != conversation_id:
+                continue
+            if record.route.name == "conversation.answer":
+                continue
+            return self._last_run_context_from_record(record)
+
+        if snapshot_context.run_id:
+            return snapshot_context
+        if request_context.run_id:
+            return request_context
+        return LastRunContext()
 
     def load_memory_node(self, state: AgentGraphState) -> dict[str, Any]:
         snapshot = self.memory_store.merge_request(state["request"])
+        resolved_last_run_context = self._resolve_last_run_context(
+            conversation_id=state["conversation_id"],
+            request_context=state["request"].last_run_context,
+            snapshot_context=snapshot.last_run_context,
+        )
         messages = [*snapshot.messages, ConversationTurn(role="user", content=state["request"].message)]
         updates = self._record_step(
             state,
@@ -107,18 +252,29 @@ class AgentAppGraph:
             success=True,
             summary="已加载本轮会话记忆和上一轮上下文。",
             input_data={"conversation_id": state["conversation_id"]},
-            output_data={"message_count": len(snapshot.messages), "has_last_run": bool(snapshot.last_run_context.run_id)},
+            output_data={
+                "message_count": len(snapshot.messages),
+                "has_last_run": bool(resolved_last_run_context.run_id),
+                "long_term_topics": snapshot.long_term.research_topics[:6],
+            },
             description="Load short-term memory and previous run context before routing.",
             stage="load_memory",
+        )
+        long_term_hits = self.memory_store.retrieve_long_term_context(
+            query=state["request"].message,
+            snapshot=snapshot,
+            conversation_id=state["conversation_id"],
+            limit=6,
         )
         return {
             **updates,
             "memory_snapshot": snapshot,
             "messages": messages,
             "uploaded_assets": state["request"].uploaded_assets or snapshot.uploaded_assets,
-            "last_run_context": state["request"].last_run_context if state["request"].last_run_context.run_id else snapshot.last_run_context,
+            "last_run_context": resolved_last_run_context,
             "recognition_result": snapshot.recognition_result,
             "current_context_summary": snapshot.current_context_summary,
+            "long_term_memory_hits": long_term_hits,
         }
 
     def supervisor_node(self, state: AgentGraphState) -> dict[str, Any]:
@@ -156,10 +312,66 @@ class AgentAppGraph:
             description="Interpret the uploaded phase-diagram image into structured fields.",
             stage="recognition",
         )
-        return {
+        next_state: dict[str, Any] = {
             **updates,
             "recognition_result": result,
         }
+        if state.get("user_intent") == "recognition.analyze" and self._should_build_recognition_simulator(state):
+            simulator_bundle = self.recognition_agent.build_simulation_bundle(state=state, recognition_result=result)
+            simulator_updates = self._record_step(
+                {**state, **next_state},
+                tool_name="RecognitionAgent.simulator",
+                success=True,
+                summary="RecognitionAgent 已生成可交互的相图模拟器。",
+                input_data={"recognized_system": result.system, "critical_point_count": len(result.critical_points)},
+                output_data={
+                    "html_path": simulator_bundle.html_path,
+                    "artifact_count": len(simulator_bundle.artifacts),
+                    "category": simulator_bundle.result_profile.category,
+                },
+                description="Turn the recognized phase-diagram structure into an interactive temperature/pressure simulator.",
+                stage="recognition_simulator",
+            )
+            next_state.update(
+                {
+                    **simulator_updates,
+                    "artifact_messages": simulator_bundle.artifacts,
+                    "html_content": simulator_bundle.html_content,
+                    "html_path": simulator_bundle.html_path,
+                    "response_metadata": {
+                        **state.get("response_metadata", {}),
+                        **simulator_bundle.metadata,
+                    },
+                    "response_summary": {
+                        **state.get("response_summary", {}),
+                        **simulator_bundle.summary,
+                    },
+                }
+            )
+        return next_state
+
+    @staticmethod
+    def _should_build_recognition_simulator(state: AgentGraphState) -> bool:
+        decision = state.get("supervisor_decision") or {}
+        if str(decision.get("intent") or "").strip() == "recognize_image_to_interactive_simulator":
+            return True
+
+        message = state["request"].message
+        lowered = message.lower()
+        html_hints = (
+            "交互式html",
+            "交互式 html",
+            "交互式页面",
+            "交互式结果",
+            "interactive html",
+            "result.html",
+            "html文件",
+            "html render",
+            "重构",
+            "复原成html",
+            "渲染成html",
+        )
+        return any(token in lowered or token in message for token in html_hints)
 
     def compute_node(self, state: AgentGraphState) -> dict[str, Any]:
         result = self.compute_agent.run(state, state.get("supervisor_decision", {}))
@@ -183,10 +395,33 @@ class AgentAppGraph:
             "messages": chat_result["messages"],
             "success": chat_result.get("success", True),
             "error": chat_result.get("error", ""),
+            "artifact_messages": chat_result.get("artifact_messages") or state.get("artifact_messages", []),
+            "html_content": chat_result.get("html_content") or state.get("html_content", ""),
+            "html_path": chat_result.get("html_path") or state.get("html_path", ""),
+            "response_metadata": {
+                **state.get("response_metadata", {}),
+                **chat_result.get("response_metadata", {}),
+            },
+            "response_summary": {
+                **state.get("response_summary", {}),
+                **chat_result.get("response_summary", {}),
+            },
+            "termination_reason": (
+                chat_result.get("termination_reason")
+                if chat_result.get("artifact_messages") or chat_result.get("html_content") or chat_result.get("termination_reason") != "conversation_answered"
+                else state.get("termination_reason", "conversation_answered")
+            ),
         }
 
     def summarize_context_node(self, state: AgentGraphState) -> dict[str, Any]:
-        summary = self.memory_store.summarize(state.get("messages", []), state.get("last_run_context"))
+        previous_long_term = state.get("memory_snapshot").long_term if state.get("memory_snapshot") else None
+        summary = self.memory_store.summarize(
+            state.get("messages", []),
+            state.get("last_run_context"),
+            recognition_result=state.get("recognition_result"),
+            previous_long_term=previous_long_term,
+            conversation_id=state["conversation_id"],
+        )
         updates = self._record_step(
             state,
             tool_name="summarize_context",
@@ -207,16 +442,17 @@ class AgentAppGraph:
             recognition_result=state.get("recognition_result"),
             last_run_context=state.get("last_run_context"),
             current_context_summary=state.get("current_context_summary", ""),
+            previous_snapshot=state.get("memory_snapshot"),
         )
-        path = self.memory_store.save(snapshot)
+        saved_paths = self.memory_store.save(snapshot)
         updates = self._record_step(
             state,
             tool_name="save_memory",
             success=True,
             summary="已保存会话记忆。",
             input_data={"conversation_id": state["conversation_id"]},
-            output_data={"path": str(path)},
-            description="Persist the updated short-term memory snapshot for follow-up turns.",
+            output_data={key: str(value) for key, value in saved_paths.items()},
+            description="Persist both short-term and long-term memory snapshots for follow-up turns.",
             stage="save_memory",
         )
         return {**updates, "memory_snapshot": snapshot}
@@ -290,14 +526,17 @@ class AgentAppGraph:
         compute_response = state.get("phase_diagram_result") or state.get("lammps_result")
         route = state.get("route") or TaskRoute(name="conversation.answer", reason="")
         request_message = state["request"].message
+        protocol_summary = summarize_protocol_messages(state.get("protocol_messages", []))
         if compute_response is not None:
             metadata = {
                 **compute_response.metadata,
+                "request_id": state.get("request_id", ""),
                 "current_context_summary": state.get("current_context_summary", ""),
                 "runtime_final_message": compute_response.final_message,
                 "chat_final_message": state.get("final_answer", ""),
+                "agent_protocol": protocol_summary,
             }
-            summary = {"request_message": request_message, **compute_response.summary}
+            summary = {"request_message": request_message, "request_id": state.get("request_id", ""), **compute_response.summary}
             return AgentRunResponse(
                 success=bool(compute_response.success),
                 run_id=state["run_id"],
@@ -332,20 +571,27 @@ class AgentAppGraph:
             generated_code=None,
             stdout="",
             stderr="",
-            html_content=None,
-            html_path=None,
+            html_content=state.get("html_content"),
+            html_path=state.get("html_path"),
             termination_reason=state.get("termination_reason", "conversation_answered"),
-            metadata={"current_context_summary": state.get("current_context_summary", "")},
+            metadata={
+                **state.get("response_metadata", {}),
+                "request_id": state.get("request_id", ""),
+                "current_context_summary": state.get("current_context_summary", ""),
+                "agent_protocol": protocol_summary,
+            },
             recognition_result=state.get("recognition_result"),
             current_context_summary=state.get("current_context_summary", ""),
-            summary={"request_message": request_message},
+            summary={"request_message": request_message, "request_id": state.get("request_id", ""), **state.get("response_summary", {})},
         )
 
     def run_chat(self, request: AgentChatRequest, event_sink=None) -> AgentRunResponse:
         run_id = self.artifact_service.create_run_id()
+        request_id = request.request_id or new_request_id()
         initial_route = TaskRoute(name="supervisor.dispatch", reason="The global 4-agent graph is starting.")
         initial_state: AgentGraphState = {
             "run_id": run_id,
+            "request_id": request_id,
             "conversation_id": request.conversation_id,
             "request": request,
             "messages": [],
@@ -359,24 +605,36 @@ class AgentAppGraph:
             "lammps_result": None,
             "last_run_context": request.last_run_context,
             "artifact_messages": [],
+            "html_content": "",
+            "html_path": "",
             "current_context_summary": "",
             "final_answer": "",
             "error": "",
             "success": True,
             "termination_reason": "",
             "response_metadata": {},
+            "response_summary": {},
             "plan_steps": [],
             "trace": [],
             "event_sink": event_sink,
             "memory_snapshot": MemorySnapshot(conversation_id=request.conversation_id),
+            "protocol_messages": [],
         }
         self._emit(
             initial_state,
             AgentStreamEvent(
                 type="run_started",
                 run_id=run_id,
-                payload={"route": initial_route.model_dump(mode="json"), "message": request.message},
+                payload={"route": initial_route.model_dump(mode="json"), "message": request.message, "request_id": request_id},
             ),
+        )
+        log_event(
+            "run.started",
+            request_id=request_id,
+            run_id=run_id,
+            conversation_id=request.conversation_id,
+            message=request.message,
+            route_name=initial_route.name,
         )
         try:
             final_state = self.graph.invoke(initial_state)
@@ -401,15 +659,18 @@ class AgentAppGraph:
                 generated_code=None,
                 stdout="",
                 stderr="",
-                html_content=None,
-                html_path=None,
+                html_content=final_state.get("html_content"),
+                html_path=final_state.get("html_path"),
                 termination_reason=final_state["termination_reason"],
                 metadata={
+                    **final_state.get("response_metadata", {}),
                     "current_context_summary": final_state.get("current_context_summary", ""),
                     "error_type": exc.__class__.__name__,
+                    "request_id": request_id,
                 },
                 recognition_result=final_state.get("recognition_result"),
                 current_context_summary=final_state.get("current_context_summary", ""),
+                summary={"request_message": request.message, "request_id": request_id, **final_state.get("response_summary", {})},
             )
             self._emit(
                 final_state,
@@ -417,19 +678,42 @@ class AgentAppGraph:
                     type="run_error",
                     run_id=run_id,
                     payload={
+                        "request_id": request_id,
                         "message": str(exc),
                         "termination_reason": final_state["termination_reason"],
                         "error_type": exc.__class__.__name__,
                     },
                 ),
             )
+            log_event(
+                "run.failed",
+                level="error",
+                request_id=request_id,
+                run_id=run_id,
+                conversation_id=request.conversation_id,
+                message=str(exc),
+                termination_reason=final_state["termination_reason"],
+                error_type=exc.__class__.__name__,
+            )
         self._emit(
             final_state,
             AgentStreamEvent(
                 type="run_completed",
                 run_id=run_id,
-                payload={"response": response.model_dump(mode="json", exclude={"html_content"})},
+                payload={"response": response.model_dump(mode="json", exclude={"html_content"}), "request_id": request_id},
             ),
         )
         self.artifact_service.write_run_summary(response)
+        log_event(
+            "run.completed",
+            request_id=request_id,
+            run_id=run_id,
+            conversation_id=request.conversation_id,
+            message=response.final_message,
+            route_name=response.route.name,
+            success=response.success,
+            run_status=response.run_status,
+            artifact_count=len(response.artifacts),
+            trace_count=len(response.trace),
+        )
         return response

@@ -1,12 +1,26 @@
-import { useCallback, useEffect, useMemo, useReducer, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 
-import { cancelRunRequest, getRunResultHtml, getRunSummary, getRuns, runAgentChat, streamAgentChat } from '../../services/api'
+import {
+  cancelJobRequest,
+  cancelRunRequest,
+  getAgentJobResult,
+  getArtifactText,
+  getConversationSnapshot,
+  getRunResultHtml,
+  getRunSummary,
+  getRuns,
+  runAgentChat,
+  streamAgentChat,
+  streamAgentChatJob,
+  submitAgentChatJob,
+} from '../../services/api'
 import type {
   AgentChatRequest,
   AgentRunResponse,
   AgentStreamEvent,
   ArtifactRef,
   ClientSettings,
+  ConversationSnapshotResponse,
   ConversationTurn,
   LastRunContext,
   PlanStep,
@@ -15,11 +29,14 @@ import type {
   RunStatus,
   TaskRoute,
   ToolObservation,
+  UploadedAsset,
 } from '../../types/api'
 
 type UiRunStatus = 'idle' | 'streaming' | 'loading-result' | 'completed' | 'error'
 type MessageTone = 'normal' | 'status' | 'warning'
 const TERMINAL_RUN_STATUSES = new Set<RunStatus>(['completed', 'failed', 'cancelled'])
+const CHAT_STATE_STORAGE_KEY = 'materials-agent-chat-state-v1'
+const ACTIVE_CONVERSATION_STORAGE_KEY = 'materials-agent-active-conversation-v1'
 
 export interface ConversationMessage {
   id: string
@@ -35,6 +52,7 @@ export interface ConversationMessage {
   routeName?: string
   runStatus?: RunStatus | string
   summary?: Record<string, unknown>
+  attachments?: UploadedAsset[]
 }
 
 export interface LiveProgressStep {
@@ -55,6 +73,7 @@ export interface LiveProgressSnapshot {
 interface AgentChatState {
   conversationId: string
   messages: ConversationMessage[]
+  jobId: string
   runId: string
   route: TaskRoute | null
   planSteps: PlanStep[]
@@ -78,12 +97,14 @@ interface AgentChatState {
 
 type Action =
   | { type: 'send_started'; payload: AgentChatRequest }
+  | { type: 'job_submitted'; jobId: string; message: string }
   | { type: 'assistant_message'; message: ConversationMessage }
   | { type: 'status_updated'; message: string; status?: UiRunStatus; isLoading?: boolean }
   | { type: 'stream_event'; event: AgentStreamEvent }
   | { type: 'response_received'; response: AgentRunResponse }
   | { type: 'run_loaded'; response: AgentRunResponse }
   | { type: 'result_html_loaded'; htmlContent: string }
+  | { type: 'hydrate'; state: AgentChatState }
   | { type: 'run_failed'; message: string }
   | { type: 'reset'; conversationId: string }
 
@@ -148,6 +169,10 @@ function hasRenderableArtifacts(artifacts: ArtifactRef[]): boolean {
   return artifacts.some((artifact) => ['html', 'image', 'video', 'markdown'].includes(artifact.kind))
 }
 
+function hasRenderablePayload(htmlContent: string | null | undefined, artifacts: ArtifactRef[]): boolean {
+  return Boolean(htmlContent) || hasRenderableArtifacts(artifacts)
+}
+
 function upsertArtifactMessage(
   messages: ConversationMessage[],
   {
@@ -168,7 +193,7 @@ function upsertArtifactMessage(
     runStatus: RunStatus | string
   },
 ): ConversationMessage[] {
-  if (!hasRenderableArtifacts(artifacts)) {
+  if (!hasRenderablePayload(htmlContent, artifacts)) {
     return messages
   }
 
@@ -206,7 +231,11 @@ function makeRecognitionMessage(recognitionResult: RecognitionResult): Conversat
 }
 
 function isArtifactRoute(routeName: string | undefined): boolean {
-  return routeName === 'phase_diagram.generate' || routeName === 'mixed.request' || routeName === 'lammps.generate'
+  return routeName === 'phase_diagram.generate' || routeName === 'mixed.request' || routeName === 'lammps.generate' || routeName === 'recognition.analyze'
+}
+
+function responseCarriesRenderableArtifact(response: AgentRunResponse): boolean {
+  return hasRenderablePayload(response.html_content, response.artifacts || [])
 }
 
 function formatAgentRequestError(message: string, apiBaseUrl: string): string {
@@ -310,10 +339,10 @@ function terminalMessageFromResponse(response: AgentRunResponse): ConversationMe
 
 
 function artifactMessageFromResponse(response: AgentRunResponse): ConversationMessage | null {
-  if (response.route.name === 'lammps.generate' && response.artifacts.length) {
+  if (responseCarriesRenderableArtifact(response)) {
     return makeArtifactMessage(
-      '',
-      response.success ? 'LAMMPS 结果已返回。' : 'LAMMPS 任务异常。',
+      response.html_content || '',
+      nextStatusMessage(response),
       response.artifacts,
       response.summary || {},
       response.run_id,
@@ -431,6 +460,27 @@ function extractReviewPayload(metadata: Record<string, unknown>): Record<string,
 }
 
 export function buildLastRunContext(state: AgentChatState): LastRunContext {
+  if (!state.runId || state.route?.name === 'conversation.answer') {
+    return {
+      run_id: '',
+      route_name: '',
+      compute_domain: 'none',
+      system_name: '',
+      final_message: '',
+      generated_code_preview: '',
+      review_summary: '',
+      selected_tool: '',
+      generation_source: '',
+      request_summary: '',
+      review_passed: null,
+      review_issues: [],
+      review_advisory_issues: [],
+      trace_summary: [],
+      recognition_summary: '',
+      artifact_names: [],
+    }
+  }
+
   const review = extractReviewPayload(state.responseMetadata)
   const artifactNames = state.artifacts.map((artifact) => artifact.name)
   return {
@@ -456,11 +506,16 @@ export function buildLastRunContext(state: AgentChatState): LastRunContext {
 }
 
 function nextStatusMessage(response: AgentRunResponse): string {
+  if (response.route.name === 'conversation.answer' && responseCarriesRenderableArtifact(response)) {
+    return '已在当前对话中直接渲染交互式 HTML。'
+  }
   if (response.route.name === 'conversation.answer') {
     return '本轮停留在对话模式，没有调用后端工具链。'
   }
   if (response.route.name === 'recognition.analyze') {
-    return 'RecognitionAgent 已完成截图结构化识别。'
+    return response.html_content || hasHtmlArtifact(response)
+      ? 'RecognitionAgent 已生成可交互的识别模拟器。'
+      : 'RecognitionAgent 已完成截图结构化识别。'
   }
   if (response.route.name === 'lammps.generate') {
     return response.success ? 'LAMMPS 结果已返回。' : 'LAMMPS 任务没有通过完整流程。'
@@ -482,8 +537,140 @@ function hasHtmlArtifact(response: AgentRunResponse): boolean {
   )
 }
 
+function buildConversationMessageFromTurn(turn: ConversationTurn): ConversationMessage {
+  return {
+    id: createMessageId(),
+    role: turn.role,
+    tone: 'normal',
+    content: turn.content,
+    kind: 'text',
+  }
+}
+
+function compactMessageAttachments(attachments: UploadedAsset[] | undefined): UploadedAsset[] | undefined {
+  if (!attachments?.length) {
+    return undefined
+  }
+  return attachments.map((asset) => ({
+    ...asset,
+    data_url: '',
+  }))
+}
+
+function attachAssetsToLatestUserMessage(
+  messages: ConversationMessage[],
+  uploadedAssets: UploadedAsset[],
+): ConversationMessage[] {
+  if (!uploadedAssets.length) {
+    return messages
+  }
+  const latestUserIndex = [...messages].reverse().findIndex((message) => message.role === 'user')
+  if (latestUserIndex < 0) {
+    return messages
+  }
+  const targetIndex = messages.length - 1 - latestUserIndex
+  const targetMessage = messages[targetIndex]
+  if (targetMessage.attachments?.length) {
+    return messages
+  }
+  const patchedMessage: ConversationMessage = {
+    ...targetMessage,
+    attachments: uploadedAssets,
+  }
+  return [...messages.slice(0, targetIndex), patchedMessage, ...messages.slice(targetIndex + 1)]
+}
+
+function buildStateFromConversationSnapshot(snapshot: ConversationSnapshotResponse): AgentChatState {
+  const latestResponse = snapshot.latest_run ? responseFromRunRecord(snapshot.latest_run) : null
+  const baseState = latestResponse ? applyAgentRunResponse(initialState, latestResponse) : { ...initialState, conversationId: snapshot.conversation_id }
+  let messages = snapshot.short_term.messages.map(buildConversationMessageFromTurn)
+  messages = attachAssetsToLatestUserMessage(messages, snapshot.short_term.uploaded_assets || [])
+  if (snapshot.short_term.recognition_result && !messages.some((message) => message.kind === 'recognition')) {
+    messages = [...messages, makeRecognitionMessage(snapshot.short_term.recognition_result)]
+  }
+  if (latestResponse) {
+    const artifactMessage = artifactMessageFromResponse(latestResponse)
+    if (artifactMessage) {
+      messages = mergeResponseMessages(messages, latestResponse, [artifactMessage])
+    }
+  }
+  return {
+    ...baseState,
+    conversationId: snapshot.conversation_id,
+    messages,
+    recognitionResult: snapshot.short_term.recognition_result,
+    currentContextSummary: snapshot.short_term.current_context_summary || baseState.currentContextSummary,
+    runId: latestResponse?.run_id || snapshot.short_term.last_run_context.run_id || '',
+    route: latestResponse?.route || baseState.route,
+    runStatus: latestResponse?.run_status || baseState.runStatus,
+    artifacts: latestResponse?.artifacts || baseState.artifacts,
+    summary: latestResponse?.summary || baseState.summary,
+    responseMetadata: latestResponse?.metadata || baseState.responseMetadata,
+    finalMessage: latestResponse?.final_message || baseState.finalMessage,
+    isLoading: false,
+    status: 'completed',
+    statusMessage: messages.length ? '已恢复上一轮会话。' : '等待输入',
+  }
+}
+
+function readStoredConversationId(): string {
+  try {
+    return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function readStoredAgentState(): AgentChatState | null {
+  try {
+    const raw = window.localStorage.getItem(CHAT_STATE_STORAGE_KEY)
+    if (!raw) {
+      return null
+    }
+    const parsed = JSON.parse(raw) as Partial<AgentChatState>
+    if (!parsed || typeof parsed !== 'object') {
+      return null
+    }
+    const conversationId = typeof parsed.conversationId === 'string' && parsed.conversationId.trim() ? parsed.conversationId : createConversationId()
+    return {
+      ...initialState,
+      ...parsed,
+      conversationId,
+      messages: Array.isArray(parsed.messages) ? parsed.messages : [],
+      planSteps: Array.isArray(parsed.planSteps) ? parsed.planSteps : [],
+      timeline: Array.isArray(parsed.timeline) ? parsed.timeline : [],
+      artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
+      responseMetadata: parsed.responseMetadata && typeof parsed.responseMetadata === 'object' ? parsed.responseMetadata : {},
+      summary: parsed.summary && typeof parsed.summary === 'object' ? parsed.summary : {},
+      isLoading: false,
+      status: parsed.messages && Array.isArray(parsed.messages) && parsed.messages.length ? 'completed' : 'idle',
+      statusMessage: typeof parsed.statusMessage === 'string' && parsed.statusMessage ? parsed.statusMessage : '等待输入',
+    }
+  } catch {
+    return null
+  }
+}
+
+function persistAgentState(state: AgentChatState): void {
+  try {
+    const payload: AgentChatState = {
+      ...state,
+      messages: state.messages.slice(-40).map((message) => ({
+        ...message,
+        attachments: compactMessageAttachments(message.attachments),
+      })),
+      timeline: state.timeline.slice(-20),
+      planSteps: state.planSteps.slice(-20),
+    }
+    window.localStorage.setItem(CHAT_STATE_STORAGE_KEY, JSON.stringify(payload))
+    window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, state.conversationId)
+  } catch {
+    // ignore localStorage failures
+  }
+}
+
 function applyAgentRunResponse(state: AgentChatState, response: AgentRunResponse): AgentChatState {
-  const expectsPhaseArtifact = isArtifactRoute(response.route.name) && response.success && hasHtmlArtifact(response)
+  const expectsPhaseArtifact = response.success && responseCarriesRenderableArtifact(response) && hasHtmlArtifact(response)
   return {
     ...state,
     conversationId: response.conversation_id || state.conversationId,
@@ -542,6 +729,7 @@ function delay(ms: number): Promise<void> {
 const initialState: AgentChatState = {
   conversationId: createConversationId(),
   messages: [],
+  jobId: '',
   runId: '',
   route: null,
   planSteps: [],
@@ -575,8 +763,11 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
             role: 'user',
             tone: 'normal',
             content: action.payload.message,
+            kind: 'text',
+            attachments: action.payload.uploaded_assets,
           },
         ],
+        jobId: '',
         runId: '',
         route: null,
         planSteps: [],
@@ -596,6 +787,14 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
         isLoading: true,
         status: 'streaming',
         statusMessage: 'Agent 正在处理中…',
+      }
+    case 'job_submitted':
+      return {
+        ...state,
+        jobId: action.jobId,
+        status: 'streaming',
+        isLoading: true,
+        statusMessage: action.message,
       }
     case 'assistant_message':
       return {
@@ -723,11 +922,24 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
         htmlContent: action.htmlContent,
         isLoading: false,
         status: 'completed',
-        statusMessage: '相图结果页已加载。',
-        messages: [
-          ...state.messages,
-          makeArtifactMessage(action.htmlContent, '相图结果页已加载。', state.artifacts, state.summary, state.runId, state.route?.name || '', state.runStatus),
-        ],
+        statusMessage: state.route?.name === 'recognition.analyze' ? '识别模拟器已加载。' : '相图结果页已加载。',
+        messages: upsertArtifactMessage(state.messages, {
+          htmlContent: action.htmlContent,
+          artifactStatus: state.route?.name === 'recognition.analyze' ? '识别模拟器已加载。' : '相图结果页已加载。',
+          artifacts: state.artifacts,
+          summary: state.summary,
+          runId: state.runId,
+          routeName: state.route?.name || '',
+          runStatus: state.runStatus,
+        }),
+      }
+    case 'hydrate':
+      return {
+        ...initialState,
+        ...action.state,
+        isLoading: false,
+        status: action.state.messages.length ? 'completed' : 'idle',
+        statusMessage: action.state.statusMessage || (action.state.messages.length ? '已恢复上一轮会话。' : '等待输入'),
       }
     case 'run_failed':
       return {
@@ -748,8 +960,9 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
 }
 
 export function useAgentChat(settings: ClientSettings) {
-  const [state, dispatch] = useReducer(reducer, initialState)
+  const [state, dispatch] = useReducer(reducer, initialState, () => readStoredAgentState() ?? initialState)
   const [runHistory, setRunHistory] = useState<RunRecordSummary[]>([])
+  const hasAttemptedServerRestoreRef = useRef(false)
 
   const refreshRunHistory = useCallback(async () => {
     try {
@@ -764,16 +977,23 @@ export function useAgentChat(settings: ClientSettings) {
     void refreshRunHistory()
   }, [refreshRunHistory])
 
+  useEffect(() => {
+    persistAgentState(state)
+  }, [state])
+
   const loadResultHtml = useCallback(
     async (response: AgentRunResponse) => {
-      if (!isArtifactRoute(response.route.name) || !response.run_id || !hasHtmlArtifact(response)) {
+      if (!responseCarriesRenderableArtifact(response)) {
         return
       }
       if (response.html_content) {
         dispatch({ type: 'result_html_loaded', htmlContent: response.html_content })
         return
       }
-      const html = await getRunResultHtml(settings, response.run_id)
+      const htmlArtifact = response.artifacts.find((artifact) => artifact.kind === 'html' && (artifact.url || artifact.path))
+      const html = htmlArtifact
+        ? await getArtifactText(settings, htmlArtifact.url || htmlArtifact.path || '')
+        : await getRunResultHtml(settings, response.run_id)
       dispatch({ type: 'result_html_loaded', htmlContent: html })
     },
     [settings],
@@ -810,12 +1030,38 @@ export function useAgentChat(settings: ClientSettings) {
     [settings],
   )
 
+  const waitForJobTerminalResult = useCallback(
+    async (jobId: string): Promise<RunRecordSummary> => {
+      const deadline = Date.now() + Math.max(settings.requestTimeoutMs, 15 * 60 * 1000)
+
+      while (Date.now() <= deadline) {
+        const payload = await getAgentJobResult(settings, jobId)
+        if (payload.ready && payload.run) {
+          return payload.run
+        }
+        if (TERMINAL_RUN_STATUSES.has(payload.job.status) && !payload.run) {
+          throw new Error(payload.job.error || `Job 已结束，但没有可加载的 run 结果：${payload.job.status}`)
+        }
+        dispatch({
+          type: 'status_updated',
+          message: payload.job.progress_message || '后台任务仍在执行，我正在继续等待结果。',
+          status: 'streaming',
+          isLoading: true,
+        })
+        await delay(2500)
+      }
+
+      throw new Error('当前后台任务仍未完成。你可以稍后从左侧 Server runs 继续查看结果。')
+    },
+    [settings],
+  )
+
   const handleStreamEvent = useCallback(
     (event: AgentStreamEvent) => {
       dispatch({ type: 'stream_event', event })
       if (event.type === 'run_completed') {
         const response = event.payload.response as AgentRunResponse | undefined
-        if (response && isArtifactRoute(response.route.name)) {
+        if (response && responseCarriesRenderableArtifact(response)) {
           void loadResultHtml(response).catch((error) => {
             dispatch({ type: 'run_failed', message: error instanceof Error ? error.message : '结果页面加载失败。' })
           })
@@ -837,6 +1083,7 @@ export function useAgentChat(settings: ClientSettings) {
       dispatch({ type: 'send_started', payload: payloadWithContext })
       let streamedRunId = ''
       let streamStarted = false
+      let submittedJobId = ''
       const trackedHandleStreamEvent = (event: AgentStreamEvent) => {
         if (event.type === 'run_started' && event.run_id) {
           streamedRunId = event.run_id
@@ -844,6 +1091,55 @@ export function useAgentChat(settings: ClientSettings) {
         }
         handleStreamEvent(event)
       }
+
+      try {
+        const job = await submitAgentChatJob(settings, payloadWithContext)
+        submittedJobId = job.job_id
+        dispatch({
+          type: 'job_submitted',
+          jobId: job.job_id,
+          message: job.progress_message || '任务已进入后台队列，正在等待 worker 接管。',
+        })
+        await streamAgentChatJob(settings, job.job_id, trackedHandleStreamEvent)
+        return
+      } catch (_jobError) {
+        if (submittedJobId) {
+          dispatch({
+            type: 'status_updated',
+            message: streamStarted
+              ? 'Job 事件流中断了，但任务已经启动。我正在继续轮询当前 run 状态。'
+              : 'Job 事件流中断了，但任务已经提交。我正在继续轮询后台 job 结果。',
+            status: 'streaming',
+            isLoading: true,
+          })
+          try {
+            const record = streamStarted && streamedRunId
+              ? await waitForRunTerminalStatus(streamedRunId)
+              : await waitForJobTerminalResult(submittedJobId)
+            const response = responseFromRunRecord(record)
+            dispatch({ type: 'response_received', response })
+            if (responseCarriesRenderableArtifact(response) && hasHtmlArtifact(response)) {
+              await loadResultHtml(response)
+            }
+            await refreshRunHistory()
+            return
+          } catch (pollError) {
+            dispatch({
+              type: 'run_failed',
+              message: formatAgentRequestError(pollError instanceof Error ? pollError.message : '后台任务状态轮询失败。', settings.apiBaseUrl),
+            })
+            return
+          }
+        }
+
+        dispatch({
+          type: 'status_updated',
+          message: '后台队列接口不可用，我正在回退到直接流式模式。',
+          status: 'streaming',
+          isLoading: true,
+        })
+      }
+
       try {
         await streamAgentChat(settings, payloadWithContext, trackedHandleStreamEvent)
       } catch (_streamError) {
@@ -858,7 +1154,7 @@ export function useAgentChat(settings: ClientSettings) {
             const record = await waitForRunTerminalStatus(streamedRunId)
             const response = responseFromRunRecord(record)
             dispatch({ type: 'response_received', response })
-            if (isArtifactRoute(response.route.name) && hasHtmlArtifact(response)) {
+            if (responseCarriesRenderableArtifact(response) && hasHtmlArtifact(response)) {
               await loadResultHtml(response)
             }
             await refreshRunHistory()
@@ -881,7 +1177,7 @@ export function useAgentChat(settings: ClientSettings) {
         try {
           const response = await runAgentChat(settings, payloadWithContext)
           dispatch({ type: 'response_received', response })
-          if (isArtifactRoute(response.route.name)) {
+          if (responseCarriesRenderableArtifact(response)) {
             await loadResultHtml(response)
           }
           await refreshRunHistory()
@@ -893,7 +1189,7 @@ export function useAgentChat(settings: ClientSettings) {
         }
       }
     },
-    [handleStreamEvent, loadResultHtml, refreshRunHistory, settings, state, waitForRunTerminalStatus],
+    [handleStreamEvent, loadResultHtml, refreshRunHistory, settings, state, waitForJobTerminalResult, waitForRunTerminalStatus],
   )
 
   const loadRun = useCallback(
@@ -901,26 +1197,60 @@ export function useAgentChat(settings: ClientSettings) {
       const record = await getRunSummary(settings, runId)
       const response = responseFromRunRecord(record)
       dispatch({ type: 'run_loaded', response })
-      if (isArtifactRoute(response.route.name) && hasHtmlArtifact(response)) {
-        const html = await getRunResultHtml(settings, response.run_id)
-        dispatch({ type: 'result_html_loaded', htmlContent: html })
+      if (responseCarriesRenderableArtifact(response) && hasHtmlArtifact(response)) {
+        await loadResultHtml(response)
       }
     },
-    [settings],
+    [loadResultHtml, settings],
   )
 
   const cancelCurrentRun = useCallback(async () => {
+    if (state.jobId && state.isLoading) {
+      await cancelJobRequest(settings, state.jobId)
+      dispatch({ type: 'assistant_message', message: makeAssistantMessage('已发送停止请求，后端会取消当前后台任务。', 'warning') })
+      await refreshRunHistory()
+      return
+    }
     if (!state.runId) {
       return
     }
     await cancelRunRequest(settings, state.runId)
     dispatch({ type: 'assistant_message', message: makeAssistantMessage('已发送停止请求，后端会在安全点取消当前运行。', 'warning') })
     await refreshRunHistory()
-  }, [refreshRunHistory, settings, state.runId])
+  }, [refreshRunHistory, settings, state.isLoading, state.jobId, state.runId])
 
   const resetConversation = useCallback(() => {
     dispatch({ type: 'reset', conversationId: createConversationId() })
   }, [])
+
+  const restoreConversationFromServer = useCallback(
+    async (conversationId: string) => {
+      const snapshot = await getConversationSnapshot(settings, conversationId)
+      const restoredState = buildStateFromConversationSnapshot(snapshot)
+      dispatch({ type: 'hydrate', state: restoredState })
+      if (snapshot.latest_run) {
+        const latestResponse = responseFromRunRecord(snapshot.latest_run)
+        if (responseCarriesRenderableArtifact(latestResponse) && hasHtmlArtifact(latestResponse)) {
+          await loadResultHtml(latestResponse)
+        }
+      }
+    },
+    [loadResultHtml, settings],
+  )
+
+  useEffect(() => {
+    if (hasAttemptedServerRestoreRef.current) {
+      return
+    }
+    hasAttemptedServerRestoreRef.current = true
+    const storedConversationId = readStoredConversationId()
+    if (!storedConversationId || state.messages.length > 0 || state.runId) {
+      return
+    }
+    void restoreConversationFromServer(storedConversationId).catch(() => {
+      // ignore restore failures and keep local initial state
+    })
+  }, [restoreConversationFromServer, state.messages.length, state.runId])
 
   const liveProgress = useMemo<LiveProgressSnapshot | null>(() => {
     if (!state.isLoading) {

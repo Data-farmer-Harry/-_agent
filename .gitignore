@@ -44,5 +44,7 @@ tmp/
 **/tmp/
 outputs/*
 !outputs/.gitkeep
+backend/outputs/*
+!backend/outputs/.gitkeep
 logs/
 **/*.log

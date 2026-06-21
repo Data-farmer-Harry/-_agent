@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPLY=0
 INCLUDE_VENV=0
+INCLUDE_NODE_MODULES=0
 
 usage() {
   cat <<'EOF'
-Usage: cleanup-generated.sh [--apply] [--include-venv]
+Usage: cleanup_outputs.sh [--apply] [--include-venv] [--include-node-modules]
 
-Default mode is dry-run and prints the generated directories that can be removed.
-Use --apply to delete reproducible artifacts.
+Default mode is dry-run and only prints reproducible paths that can be removed.
+Use --apply to actually delete them.
 Use --include-venv only if you are happy to recreate backend/.venv afterwards.
+Use --include-node-modules only if you are happy to reinstall frontend dependencies afterwards.
+
+This script intentionally preserves:
+  - backend/outputs/memory
+  - backend/configs/thermo_databases
+  - benchmark datasets and source code
 EOF
 }
 
@@ -19,6 +26,7 @@ for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
     --include-venv) INCLUDE_VENV=1 ;;
+    --include-node-modules) INCLUDE_NODE_MODULES=1 ;;
     -h|--help)
       usage
       exit 0
@@ -32,25 +40,18 @@ for arg in "$@"; do
 done
 
 targets=(
-  "$ROOT/frontend/node_modules"
   "$ROOT/frontend/dist"
-  "$ROOT/frontend/node_modules"
-  "$ROOT/frontend/dist"
-  "$ROOT/outputs"
-  "$ROOT/src/__pycache__"
-  "$ROOT/src/Multi_agents/__pycache__"
-  "$ROOT/src/config/__pycache__"
-  "$ROOT/src/graphs/__pycache__"
-  "$ROOT/src/reasoning/__pycache__"
-  "$ROOT/src/schemas/__pycache__"
-  "$ROOT/src/tools/__pycache__"
-  "$ROOT/src/utils/__pycache__"
-  "$ROOT/frontend/src/__pycache__"
-  "$ROOT/frontend/src/__pycache__"
+  "$ROOT/backend/outputs/runs"
+  "$ROOT/backend/outputs/recognition_diagnostics"
+  "$ROOT/backend/.pytest_cache"
 )
 
 if [[ "$INCLUDE_VENV" -eq 1 ]]; then
   targets+=("$ROOT/backend/.venv")
+fi
+
+if [[ "$INCLUDE_NODE_MODULES" -eq 1 ]]; then
+  targets+=("$ROOT/frontend/node_modules")
 fi
 
 echo "Repository root: $ROOT"
@@ -69,6 +70,22 @@ for target in "${targets[@]}"; do
     echo "Missing: $target"
   fi
 done
+
+while IFS= read -r cache_dir; do
+  if [[ "$APPLY" -eq 1 ]]; then
+    echo "Removing: $cache_dir"
+    rm -rf "$cache_dir"
+  else
+    echo "Would remove: $cache_dir"
+  fi
+done < <(
+  find \
+    "$ROOT/backend/app" \
+    "$ROOT/backend/tests" \
+    "$ROOT/backend/examples" \
+    "$ROOT/backend/benchmarks" \
+    -type d -name __pycache__ 2>/dev/null | sort
+)
 
 if [[ "$APPLY" -eq 0 ]]; then
   echo

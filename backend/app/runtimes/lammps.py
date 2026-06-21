@@ -16,6 +16,9 @@ from app.lammps.registry import get_lammps_registry_payload, get_supported_mater
 from app.lammps.runner import run_lammps, run_mock
 from app.lammps.template import get_lammps_form_schema, generate_lammps_input
 from app.lammps.validator import validate_request
+from app.materials_rag.service import MaterialsRagService
+from app.materials_rag.normalizer import extract_materials, normalize_material
+from app.runtimes.telemetry import build_runtime_execution_profile, initialize_runtime_state
 from app.state import (
     AgentChatRequest,
     AgentRunResponse,
@@ -24,7 +27,6 @@ from app.state import (
     LammpsRequest,
     PlanStep,
     RecognitionResult,
-    RunRecordSummary,
     RunStatus,
     RunTrace,
     TaskRoute,
@@ -53,10 +55,12 @@ class LammpsRuntime:
         artifact_service: ArtifactService,
         llm_client: LLMClient | None = None,
         config_loader=load_lammps_config,
+        materials_rag_service: MaterialsRagService | None = None,
     ) -> None:
         self.artifact_service = artifact_service
         self.llm_client = llm_client or LLMClient()
         self.config_loader = config_loader
+        self.materials_rag_service = materials_rag_service or MaterialsRagService()
 
     @staticmethod
     def _emit(state: dict[str, Any], event: AgentStreamEvent) -> None:
@@ -166,8 +170,99 @@ class LammpsRuntime:
             )
         )
 
+    @staticmethod
+    def _serialize_materials_rag_hits(hits: list[object]) -> list[dict[str, object]]:
+        payload: list[dict[str, object]] = []
+        for hit in hits:
+            payload.append(
+                {
+                    "title": hit.document.title,
+                    "doc_type": hit.document.doc_type,
+                    "score": hit.score,
+                    "lexical_score": getattr(hit, "lexical_score", 0.0),
+                    "bm25_score": getattr(hit, "bm25_score", 0.0),
+                    "vector_score": getattr(hit, "vector_score", 0.0),
+                    "embedding_backend": getattr(hit, "embedding_backend", ""),
+                    "matched_fields": list(hit.matched_fields),
+                    "source": hit.document.source,
+                    "source_url": hit.document.source_url,
+                }
+            )
+        return payload
+
+    @staticmethod
+    def _materials_rag_material_hint(message: str, fallback_material: str | None = None) -> str | None:
+        hinted = next(iter(extract_materials(message)), None)
+        if hinted:
+            return hinted
+        return normalize_material(fallback_material)
+
+    def _planning_materials_rag(self, request: AgentChatRequest) -> dict[str, object]:
+        material_hint = self._materials_rag_material_hint(request.message)
+        hits = self.materials_rag_service.search(
+            request.message,
+            domain="lammps",
+            material=material_hint,
+            top_k=4,
+        )
+        context = self.materials_rag_service.build_context(
+            request.message,
+            domain="lammps",
+            material=material_hint,
+            top_k=4,
+            max_items=3,
+        )
+        return {
+            "query": request.message,
+            "material": material_hint,
+            "hits": hits,
+            "context": context,
+        }
+
+    def _error_materials_rag(self, *, error_text: str, material: str | None, request_message: str) -> dict[str, object]:
+        query = f"{request_message}\n{error_text}".strip()
+        material_hint = self._materials_rag_material_hint(query, material)
+        hits = self.materials_rag_service.search(
+            query,
+            domain="lammps",
+            doc_type="error_cookbook",
+            material=material_hint,
+            top_k=3,
+        )
+        context = self.materials_rag_service.build_context(
+            query,
+            domain="lammps",
+            doc_type="error_cookbook",
+            material=material_hint,
+            top_k=3,
+            max_items=2,
+        )
+        return {
+            "query": query,
+            "material": material_hint,
+            "hits": hits,
+            "context": context,
+        }
+
+    @staticmethod
+    def _error_diagnostic_lines(error_payload: dict[str, object]) -> list[str]:
+        hits = list(error_payload.get("hits", []))
+        if not hits:
+            return []
+        lines = ["基于材料知识检索的可能原因与建议："]
+        for hit in hits[:2]:
+            lines.append(f"- {hit.document.title}：{hit.document.content}")
+            if hit.document.source_url:
+                lines.append(f"  来源：{hit.document.source_url}")
+        return lines
+
     @classmethod
-    def _heuristic_request(cls, message: str, notes: str, attachment_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _heuristic_request(
+        cls,
+        message: str,
+        notes: str,
+        attachment_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         raw = message.lower()
         material = ""
         for alias, normalized in cls.MATERIAL_ALIASES.items():
@@ -206,6 +301,7 @@ class LammpsRuntime:
         *,
         attachment_overrides: dict[str, Any] | None = None,
         attachment_context: list[dict[str, Any]] | None = None,
+        materials_rag_context: str = "",
     ) -> tuple[LammpsRequest, dict[str, Any]]:
         heuristic = self._heuristic_request(request.message, request.notes, attachment_overrides)
         if not self.llm_client.is_configured():
@@ -225,6 +321,7 @@ class LammpsRuntime:
                     f"User message:\n{request.message}\n\n"
                     f"Caller notes:\n{request.notes}\n\n"
                     f"Uploaded assets:\n{json.dumps(attachment_context or [], ensure_ascii=False)}\n\n"
+                    f"Materials RAG context:\n{materials_rag_context or '(none)'}\n\n"
                     f"Registry:\n{json.dumps(registry, ensure_ascii=False)}\n\n"
                     f"Heuristic baseline:\n{json.dumps(heuristic, ensure_ascii=False)}"
                 ),
@@ -440,18 +537,20 @@ potentials_dir={config.potentials_dir}
         trace: list[ToolObservation],
         metadata: dict[str, Any],
     ) -> None:
-        record = RunRecordSummary(
+        response = AgentRunResponse(
+            success=status not in {"failed", "cancelled"},
             run_id=run_id,
             conversation_id=conversation_id,
-            status=status,
             route=route,
             final_message=final_message,
-            summary=summary,
             artifacts=artifacts,
+            plan_steps=[],
             trace=trace,
             metadata=metadata,
+            summary=summary,
+            run_status=status,
         )
-        write_json_file(self.artifact_service.get_summary_path(run_id), record.model_dump(mode="json"))
+        self.artifact_service.write_run_summary(response)
 
     def _write_running_progress(
         self,
@@ -559,6 +658,8 @@ potentials_dir={config.potentials_dir}
         existing_plan_steps: list[PlanStep] | None = None,
         existing_trace: list[ToolObservation] | None = None,
         existing_artifacts: list[ArtifactRef] | None = None,
+        prestructured_request: LammpsRequest | None = None,
+        prestructured_parse_info: dict[str, Any] | None = None,
     ) -> AgentRunResponse:
         _ = recognition_result
         route = TaskRoute(
@@ -587,17 +688,38 @@ potentials_dir={config.potentials_dir}
             "error": "",
             "review": {},
             "summary": {},
+            "materials_rag": {},
             "event_sink": event_sink,
         }
+        initialize_runtime_state(
+            state,
+            runtime_name="LammpsRuntime",
+            capability_tags=[
+                "lammps",
+                "materials_rag",
+                "local_md_execute",
+                "trajectory_postprocess",
+                "ovito_optional",
+                "review_repair_loop",
+            ],
+        )
         clear_cancellation(run_id)
         config = self.config_loader()
         state["config"] = lammps_config_public_payload()
-        request_attempt: LammpsRequest | None = None
-        parse_info: dict[str, Any] = {}
+        request_attempt: LammpsRequest | None = prestructured_request
+        parse_info: dict[str, Any] = dict(prestructured_parse_info or {})
         max_retries = max(0, config.max_retries)
         output_dir = self.artifact_service.get_run_dir(run_id)
         uploaded_attachments = persist_uploaded_assets(request.uploaded_assets, output_dir)
         attachment_overrides = infer_request_overrides(uploaded_attachments)
+        planning_rag = self._planning_materials_rag(request)
+        state["materials_rag"] = {
+            "planning": {
+                "query": planning_rag["query"],
+                "material": planning_rag["material"],
+                "hits": self._serialize_materials_rag_hits(list(planning_rag.get("hits", []))),
+            }
+        }
         attachment_artifacts = [
             self._build_artifact(
                 run_id=run_id,
@@ -610,6 +732,23 @@ potentials_dir={config.potentials_dir}
         ]
         if attachment_artifacts:
             state["artifacts"] = self._merge_artifacts(state["artifacts"], attachment_artifacts)
+        self._record_step(
+            state,
+            tool_name="materials_rag_search",
+            success=True,
+            summary=(
+                f"已召回 {len(planning_rag.get('hits', []))} 条材料知识，用于 LAMMPS 请求解释和参数建议。"
+                if planning_rag.get("hits")
+                else "未召回额外的材料知识卡片，继续使用现有 registry 与请求解析链路。"
+            ),
+            input_data={"message": request.message},
+            output_data={
+                "material": planning_rag["material"],
+                "hits": self._serialize_materials_rag_hits(list(planning_rag.get("hits", []))),
+            },
+            description="Retrieve lightweight materials-domain knowledge before LAMMPS request parsing.",
+            stage="materials_rag_preflight",
+        )
 
         for attempt in range(max_retries + 1):
             if request_attempt is None:
@@ -617,6 +756,7 @@ potentials_dir={config.potentials_dir}
                     request,
                     attachment_overrides=attachment_overrides,
                     attachment_context=uploaded_attachments,
+                    materials_rag_context=str(planning_rag.get("context") or ""),
                 )
             state["request_payload"] = request_attempt
             state["parse_result"] = parse_info
@@ -775,6 +915,31 @@ potentials_dir={config.potentials_dir}
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
                 state["error"] = error
+                error_rag = self._error_materials_rag(
+                    error_text=error,
+                    material=request_attempt.material,
+                    request_message=request.message,
+                )
+                state["materials_rag"]["error_diagnosis"] = {
+                    "query": error_rag["query"],
+                    "material": error_rag["material"],
+                    "hits": self._serialize_materials_rag_hits(list(error_rag.get("hits", []))),
+                }
+                self._record_step(
+                    state,
+                    tool_name="materials_rag_error_search",
+                    success=True,
+                    summary=(
+                        f"已为执行错误召回 {len(error_rag.get('hits', []))} 条诊断知识。"
+                        if error_rag.get("hits")
+                        else "没有从材料知识库中召回到匹配的 LAMMPS 错误诊断卡片。"
+                    ),
+                    input_data={"error": error},
+                    output_data={"hits": self._serialize_materials_rag_hits(list(error_rag.get("hits", [])))},
+                    description="Retrieve error-cookbook knowledge for a failed LAMMPS execution.",
+                    stage=f"materials_rag_error_search_{attempt + 1}",
+                    retryable=attempt < max_retries,
+                )
                 if not config.allow_mock_fallback and not config.force_mock:
                     self._record_step(
                         state,
@@ -807,7 +972,12 @@ potentials_dir={config.potentials_dir}
                     return self._finalize(
                         state,
                         success=False,
-                        final_message="本地 LAMMPS 执行失败，我已保留输入脚本和错误信息，方便继续修复。",
+                        final_message="\n\n".join(
+                            [
+                                "本地 LAMMPS 执行失败，我已保留输入脚本和错误信息，方便继续修复。",
+                                *self._error_diagnostic_lines(error_rag),
+                            ]
+                        ),
                         termination_reason="lammps_execution_failed",
                         conversation_id=request.conversation_id,
                         run_status="failed",
@@ -910,6 +1080,7 @@ potentials_dir={config.potentials_dir}
                 "metrics": metrics,
                 "validation": validation,
                 "config": state["config"],
+                "materials_rag": state.get("materials_rag", {}),
                 "postprocess": {"ovito_status": diffusion_status},
             }
             state["summary"] = summary_payload
@@ -998,6 +1169,44 @@ potentials_dir={config.potentials_dir}
             run_status="failed",
         )
 
+    def run_structured(
+        self,
+        *,
+        run_id: str,
+        structured_request: LammpsRequest | dict[str, Any],
+        conversation_id: str = "mcp-lammps-structured",
+        original_query: str = "",
+        uploaded_assets: list[Any] | None = None,
+        decision: dict[str, Any] | None = None,
+        event_sink=None,
+        existing_plan_steps: list[PlanStep] | None = None,
+        existing_trace: list[ToolObservation] | None = None,
+        existing_artifacts: list[ArtifactRef] | None = None,
+    ) -> AgentRunResponse:
+        request_payload = (
+            structured_request
+            if isinstance(structured_request, LammpsRequest)
+            else LammpsRequest.model_validate(structured_request)
+        )
+        request = AgentChatRequest(
+            conversation_id=conversation_id,
+            message=original_query or "Structured LAMMPS request triggered via MCP.",
+            notes="Triggered via MCP lammps.run_structured",
+            uploaded_assets=list(uploaded_assets or []),
+            conversation_history=[],
+        )
+        return self.run(
+            run_id=run_id,
+            request=request,
+            decision=decision,
+            event_sink=event_sink,
+            existing_plan_steps=existing_plan_steps,
+            existing_trace=existing_trace,
+            existing_artifacts=existing_artifacts,
+            prestructured_request=request_payload,
+            prestructured_parse_info={"source": "structured_request", "confidence": 1.0},
+        )
+
     def _finalize(
         self,
         state: dict[str, Any],
@@ -1008,6 +1217,13 @@ potentials_dir={config.potentials_dir}
         conversation_id: str,
         run_status: RunStatus,
     ) -> AgentRunResponse:
+        result_profile = self._build_result_profile(state, success)
+        runtime_profile = build_runtime_execution_profile(
+            state,
+            success=success,
+            termination_reason=termination_reason,
+            result_profile=result_profile,
+        )
         trace_model = RunTrace(
             run_id=state["run_id"],
             route=state["route"],
@@ -1020,7 +1236,9 @@ potentials_dir={config.potentials_dir}
                 "config": state.get("config", {}),
                 "run_mode": state.get("run_mode", ""),
                 "review": state.get("review", {}),
+                "materials_rag": state.get("materials_rag", {}),
                 "summary": state.get("summary", {}),
+                "runtime_profile": runtime_profile,
             },
         )
         trace_path = self.artifact_service.write_trace(trace_model)
@@ -1047,22 +1265,25 @@ potentials_dir={config.potentials_dir}
                 "config": state.get("config", {}),
                 "run_mode": state.get("run_mode", ""),
                 "review": state.get("review", {}),
+                "materials_rag": state.get("materials_rag", {}),
+                "runtime_profile": runtime_profile,
             },
             recognition_result=None,
             current_context_summary="",
             summary=state.get("summary", {}),
             run_status=run_status,
         )
-        response.summary["result_profile"] = self._build_result_profile(state, success)
-        response.metadata["result_profile"] = response.summary["result_profile"]
-        self.artifact_service.write_run_summary(response)
+        response.summary["result_profile"] = result_profile
+        response.summary["runtime_profile"] = runtime_profile
+        response.metadata["result_profile"] = result_profile
+        response.metadata["runtime_profile"] = runtime_profile
         self._write_run_record(
             run_id=state["run_id"],
             conversation_id=conversation_id,
             route=state["route"],
             status=run_status,
             final_message=final_message,
-            summary=state.get("summary", {}),
+            summary=response.summary,
             artifacts=artifacts,
             trace=state["trace"],
             metadata=response.metadata,

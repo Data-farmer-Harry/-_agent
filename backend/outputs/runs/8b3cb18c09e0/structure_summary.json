@@ -1,6 +1,0 @@
-{
-  "has_dump": true,
-  "dump_file": "dump.aluminium_heating.lammpstrj",
-  "atom_count": 4,
-  "notes": "Basic dump summary for the demo pipeline."
-}

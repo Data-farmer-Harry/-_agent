@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional, TypedDict
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
+
+from app.core.agent_protocol import AgentEnvelope
 
 
 DiagramType = Literal["binary", "ternary"]
@@ -41,11 +44,23 @@ class AxisSpec(BaseModel):
     unit: str = ""
 
 
+class PlotRegionHint(BaseModel):
+    left: float | None = None
+    top: float | None = None
+    right: float | None = None
+    bottom: float | None = None
+    confidence: float | None = None
+    source: str = ""
+
+
 class CriticalPoint(BaseModel):
     label: str = ""
     composition: float | None = None
     temperature: float | None = None
     notes: str = ""
+    x_norm: float | None = None
+    y_norm: float | None = None
+    confidence: float | None = None
 
 
 class RecognitionResult(BaseModel):
@@ -53,6 +68,7 @@ class RecognitionResult(BaseModel):
     diagram_type: DiagramType = "binary"
     x_axis: AxisSpec = Field(default_factory=AxisSpec)
     y_axis: AxisSpec = Field(default_factory=AxisSpec)
+    plot_region: PlotRegionHint = Field(default_factory=PlotRegionHint)
     phases: list[str] = Field(default_factory=list)
     critical_points: list[CriticalPoint] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
@@ -126,6 +142,7 @@ class LastRunContext(BaseModel):
 
 
 class AgentChatRequest(BaseModel):
+    request_id: str = Field(default_factory=lambda: uuid4().hex[:12])
     conversation_id: str = Field(default="default")
     message: str = Field(..., min_length=1)
     system_name: str = Field(default="")
@@ -218,7 +235,11 @@ class ThermoRegistryResponse(BaseModel):
 class ThermoRagCandidate(BaseModel):
     system_name: str
     score: float
+    lexical_score: float = 0.0
+    bm25_score: float = 0.0
+    vector_score: float = 0.0
     selection_strategy: str = ""
+    embedding_backend: str = ""
     match_reasons: list[str] = Field(default_factory=list)
     matched_terms: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
@@ -240,6 +261,7 @@ class ThermoRagSearchResponse(BaseModel):
     matched: bool = False
     selection_strategy: str = "none"
     selected_system_name: str | None = None
+    embedding_backend: str = ""
     recommended_embedding_model: str = ""
     candidates: list[ThermoRagCandidate] = Field(default_factory=list)
     note: str = ""
@@ -343,7 +365,38 @@ class AgentStreamEvent(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class MemorySnapshot(BaseModel):
+class AgentJobRecord(BaseModel):
+    job_id: str
+    request_id: str = ""
+    job_type: str = "agent_chat"
+    status: RunStatus = "queued"
+    conversation_id: str = "default"
+    run_id: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    started_at: str = ""
+    finished_at: str = ""
+    progress_percent: int | None = None
+    progress_stage: str = "queued"
+    progress_message: str = "等待后台 worker 执行。"
+    request_summary: str = ""
+    result_run_id: str = ""
+    error: str = ""
+    event_count: int = 0
+
+
+class AgentJobListResponse(BaseModel):
+    count: int
+    jobs: list[AgentJobRecord] = Field(default_factory=list)
+
+
+class AgentJobEventRecord(BaseModel):
+    event_id: int
+    job_id: str
+    event: AgentStreamEvent
+
+
+class ShortTermMemorySnapshot(BaseModel):
     conversation_id: str
     messages: list[ConversationTurn] = Field(default_factory=list)
     uploaded_assets: list[UploadedAsset] = Field(default_factory=list)
@@ -356,6 +409,87 @@ class MemorySnapshot(BaseModel):
     summary_version: str = "v2"
     current_context_summary: str = ""
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class LongTermMemorySnapshot(BaseModel):
+    conversation_id: str
+    summary_version: str = "v1"
+    strategic_summary: str = ""
+    salient_facts: list[str] = Field(default_factory=list)
+    research_topics: list[str] = Field(default_factory=list)
+    completed_run_summaries: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    preferred_tools: list[str] = Field(default_factory=list)
+    user_preferences: list[str] = Field(default_factory=list)
+    retrieval_hints: list[str] = Field(default_factory=list)
+    compression_method: str = "heuristic_compaction"
+    source_message_count: int = 0
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class MemorySnapshot(BaseModel):
+    conversation_id: str
+    short_term: ShortTermMemorySnapshot | None = None
+    long_term: LongTermMemorySnapshot | None = None
+
+    @model_validator(mode="after")
+    def ensure_memory_layers(self) -> "MemorySnapshot":
+        if self.short_term is None:
+            self.short_term = ShortTermMemorySnapshot(conversation_id=self.conversation_id)
+        if self.long_term is None:
+            self.long_term = LongTermMemorySnapshot(conversation_id=self.conversation_id)
+        return self
+
+    @property
+    def messages(self) -> list[ConversationTurn]:
+        return self.short_term.messages
+
+    @property
+    def uploaded_assets(self) -> list[UploadedAsset]:
+        return self.short_term.uploaded_assets
+
+    @property
+    def recognition_result(self) -> RecognitionResult | None:
+        return self.short_term.recognition_result
+
+    @property
+    def last_run_context(self) -> LastRunContext:
+        return self.short_term.last_run_context
+
+    @property
+    def session_title(self) -> str:
+        return self.short_term.session_title
+
+    @property
+    def last_user_message(self) -> str:
+        return self.short_term.last_user_message
+
+    @property
+    def message_count(self) -> int:
+        return self.short_term.message_count
+
+    @property
+    def asset_count(self) -> int:
+        return self.short_term.asset_count
+
+    @property
+    def summary_version(self) -> str:
+        return self.short_term.summary_version
+
+    @property
+    def current_context_summary(self) -> str:
+        return self.short_term.current_context_summary
+
+
+class ConversationSnapshotResponse(BaseModel):
+    conversation_id: str
+    short_term: ShortTermMemorySnapshot
+    long_term: LongTermMemorySnapshot
+    latest_run: RunRecordSummary | None = None
+
+    @property
+    def updated_at(self) -> str:
+        return self.short_term.updated_at
 
 
 class AgentGraphState(TypedDict, total=False):
@@ -376,13 +510,19 @@ class AgentGraphState(TypedDict, total=False):
     lammps_result: AgentRunResponse | None
     last_run_context: LastRunContext
     artifact_messages: list[ArtifactRef]
+    html_content: str
+    html_path: str
     current_context_summary: str
     final_answer: str
     error: str
     success: bool
     termination_reason: str
     response_metadata: dict[str, Any]
+    response_summary: dict[str, Any]
     plan_steps: list[PlanStep]
     trace: list[ToolObservation]
     event_sink: Any
+    request_id: str
     memory_snapshot: MemorySnapshot
+    long_term_memory_hits: list[str]
+    protocol_messages: list[AgentEnvelope]

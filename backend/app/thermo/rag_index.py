@@ -3,7 +3,10 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
+from app.core.bm25 import build_bm25_index
+from app.rag.sqlite_vector_store import content_digest, get_vector_store
 from app.thermo.rag_models import ThermoCardDocument
+from app.thermo.rag_vector import build_embeddings, effective_embedding_backend, embedding_signature
 from app.thermo.registry import ThermoDatabaseCard, load_thermo_database_cards
 from app.utils.constants import normalize_system_key
 
@@ -48,9 +51,11 @@ def _tag_aliases(card: ThermoDatabaseCard) -> tuple[str, ...]:
 
 
 def _document_text(card: ThermoDatabaseCard) -> str:
+    normalized_names = [normalize_system_key(name) for name in card.all_names() if normalize_system_key(name)]
     parts = [
         card.system_name,
         *card.aliases,
+        *normalized_names,
         card.summary,
         " ".join(card.components),
         " ".join(card.phases),
@@ -64,11 +69,55 @@ def _document_text(card: ThermoDatabaseCard) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
-@lru_cache(maxsize=1)
-def build_thermo_card_index() -> tuple[ThermoCardDocument, ...]:
+def _bm25_tokens(card: ThermoDatabaseCard, text: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    tokens.extend(_tokenize(text))
+    tokens.extend(normalize_system_key(name) for name in card.all_names() if normalize_system_key(name))
+    tokens.extend(alias.lower() for alias in _component_aliases(card))
+    tokens.extend(f"component:{component.lower()}" for component in card.components)
+    tokens.extend(f"phase:{phase.lower()}" for phase in card.phases)
+    tokens.extend(f"tag:{tag.lower()}" for tag in card.tags)
+    tokens.append(f"x_component:{card.x_component.lower()}")
+    return tuple(token for token in tokens if token)
+
+
+@lru_cache(maxsize=8)
+def _build_thermo_card_index_cached(signature: str, store_path_key: str = "") -> tuple[ThermoCardDocument, ...]:
     documents: list[ThermoCardDocument] = []
-    for card in load_thermo_database_cards():
-        text = _document_text(card)
+    cards = list(load_thermo_database_cards())
+    texts = [_document_text(card) for card in cards]
+    document_ids = [card.system_name for card in cards]
+    digest = content_digest(zip(document_ids, texts))
+    bm25_token_sets = [_bm25_tokens(card, text) for card, text in zip(cards, texts)]
+    bm25_index = build_bm25_index(bm25_token_sets)
+    preferred_backend = signature.split(":", 1)[0]
+    store = get_vector_store()
+    store_current = preferred_backend != "disabled" and store.collection_is_current(
+        "thermo_rag",
+        embedding_signature=signature,
+        content_digest_value=digest,
+        document_ids=document_ids,
+    )
+    embedding_backend = preferred_backend
+    if store_current:
+        status = store.collection_status("thermo_rag")
+        if status is not None:
+            embedding_backend = status.embedding_backend
+    elif preferred_backend != "disabled":
+        vectors, embedding_backend = build_embeddings(texts, backend=preferred_backend)
+        actual_signature = embedding_signature(embedding_backend)
+        if vectors and all(vector for vector in vectors):
+            store.replace_collection(
+                "thermo_rag",
+                embedding_signature=actual_signature,
+                embedding_backend=embedding_backend,
+                content_digest_value=digest,
+                documents=[(document_id, vector) for document_id, vector in zip(document_ids, vectors)],
+            )
+    actual_signature = embedding_signature(embedding_backend)
+    if actual_signature != signature:
+        return _build_thermo_card_index_cached(actual_signature, store_path_key)
+    for index, (card, text) in enumerate(zip(cards, texts)):
         documents.append(
             ThermoCardDocument(
                 card=card,
@@ -78,6 +127,16 @@ def build_thermo_card_index() -> tuple[ThermoCardDocument, ...]:
                 component_aliases=_component_aliases(card),
                 phase_aliases=_phase_aliases(card),
                 tag_aliases=_tag_aliases(card),
+                bm25_tokens=bm25_token_sets[index],
+                bm25_stats=bm25_index.documents[index],
+                embedding_backend=embedding_backend,
+                embedding_signature=actual_signature,
             )
         )
     return tuple(documents)
+
+
+def build_thermo_card_index(preferred_backend: str | None = None) -> tuple[ThermoCardDocument, ...]:
+    backend = effective_embedding_backend(preferred_backend)
+    store = get_vector_store()
+    return _build_thermo_card_index_cached(embedding_signature(backend), str(store.path))

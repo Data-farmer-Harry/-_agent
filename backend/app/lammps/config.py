@@ -7,6 +7,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from app.config import read_runtime_config_file, update_runtime_config_file
+
 
 def _default_lammps_command() -> str:
     for candidate in (
@@ -90,6 +92,17 @@ _LOCK = Lock()
 
 def load_lammps_config() -> LammpsConfig:
     base = asdict(LammpsConfig())
+    persisted = read_runtime_config_file()
+    for key in ("lammps_command", "potentials_dir", "ovito_location", "allow_mock_fallback", "force_mock", "max_retries"):
+        value = persisted.get(key)
+        if value is None or value == "":
+            continue
+        if key in {"allow_mock_fallback", "force_mock"}:
+            base[key] = str(value).strip().lower() not in {"0", "false", "no", "off"}
+        elif key == "max_retries":
+            base[key] = int(value)
+        else:
+            base[key] = str(value).strip()
     with _LOCK:
         merged = {**base, **_RUNTIME_OVERRIDES}
     return LammpsConfig(**merged)
@@ -97,16 +110,25 @@ def load_lammps_config() -> LammpsConfig:
 
 def update_runtime_lammps_config(payload: dict[str, Any]) -> LammpsConfig:
     allowed = {"allow_mock_fallback", "force_mock", "lammps_command", "potentials_dir", "ovito_location", "max_retries"}
+    persist_patch: dict[str, Any] = {}
     with _LOCK:
         for key, value in payload.items():
             if key not in allowed or value is None:
                 continue
             if key in {"allow_mock_fallback", "force_mock"}:
-                _RUNTIME_OVERRIDES[key] = bool(value)
+                normalized = bool(value)
+                _RUNTIME_OVERRIDES[key] = normalized
+                persist_patch[key] = normalized
             elif key == "max_retries":
-                _RUNTIME_OVERRIDES[key] = int(value)
+                normalized = int(value)
+                _RUNTIME_OVERRIDES[key] = normalized
+                persist_patch[key] = normalized
             else:
-                _RUNTIME_OVERRIDES[key] = str(value).strip()
+                normalized = str(value).strip()
+                _RUNTIME_OVERRIDES[key] = normalized
+                persist_patch[key] = normalized
+    if persist_patch:
+        update_runtime_config_file(persist_patch)
     return load_lammps_config()
 
 

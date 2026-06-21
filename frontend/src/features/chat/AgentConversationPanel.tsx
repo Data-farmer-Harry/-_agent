@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useRef, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react';
-import { Send, Sparkles, Database, FlaskConical, Activity, ClipboardList, Download, Terminal, ShieldCheck } from 'lucide-react';
+import { Fragment, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { Send, Sparkles, Database, FlaskConical, Activity, ClipboardList, Download, Terminal, ShieldCheck, Paperclip, ImagePlus, X } from 'lucide-react';
 import { ArtifactResultPanel } from '../result/ArtifactResultPanel';
 import type { ClientSettings, RecognitionResult, UploadedAsset } from '../../types/api';
 import type { ConversationMessage, LiveProgressSnapshot } from './useAgentChat';
@@ -25,9 +25,34 @@ interface AgentConversationPanelProps {
 }
 
 function renderInlineMarkdown(text: string, strongClassName = 'font-semibold text-slate-900'): ReactNode[] {
-  const normalized = text.replace(/\\\*/g, '*');
-  const parts = normalized.split(/(\*\*[^*]+\*\*)/g).filter(Boolean);
+  const greekSymbols: Record<string, string> = {
+    alpha: 'α',
+    beta: 'β',
+    gamma: 'γ',
+    delta: 'δ',
+    epsilon: 'ε',
+    theta: 'θ',
+    lambda: 'λ',
+    mu: 'μ',
+    sigma: 'σ',
+    phi: 'φ',
+    omega: 'ω',
+  };
+  const normalized = text
+    .replace(/\\\*/g, '*')
+    .replace(/\\\$/g, '$')
+    .replace(/\$(?:\\{1,2})?(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|phi|omega)\$/gi, (_, symbol: string) => greekSymbols[symbol.toLowerCase()] ?? symbol)
+    .replace(/(?:\\{1,2})(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|phi|omega)\b/gi, (_, symbol: string) => greekSymbols[symbol.toLowerCase()] ?? symbol)
+    .replace(/\$([A-Za-zΑ-ω0-9_+\-(),.%/ ]{1,80})\$/g, '$1');
+  const parts = normalized.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).filter(Boolean);
   return parts.map((part, index) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <code key={`code-${index}`} className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[0.92em] text-slate-700">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
       return (
         <strong key={`strong-${index}`} className={strongClassName}>
@@ -140,6 +165,71 @@ function renderMessageContent(
   return <div className="space-y-3">{blocks}</div>;
 }
 
+function formatAssetSize(sizeBytes: number | null): string {
+  if (!sizeBytes || Number.isNaN(sizeBytes)) {
+    return '';
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(sizeBytes / 102.4) / 10)} KB`;
+  }
+  return `${Math.round((sizeBytes / (1024 * 1024)) * 10) / 10} MB`;
+}
+
+function normalizeClipboardFile(file: File, index: number): File {
+  if (file.name) {
+    return file;
+  }
+  const extension = file.type.startsWith('image/') ? file.type.replace('image/', '') || 'png' : 'bin';
+  return new File([file], `pasted-image-${Date.now()}-${index}.${extension}`, { type: file.type, lastModified: Date.now() });
+}
+
+function renderMessageAttachments(attachments: UploadedAsset[]): ReactNode {
+  if (!attachments.length) {
+    return null;
+  }
+
+  return (
+    <div className="mb-4 space-y-3">
+      <div className="flex flex-wrap gap-3">
+        {attachments.map((asset) => {
+          const isImage = asset.media_type.startsWith('image/');
+          const hasPreview = isImage && Boolean(asset.data_url);
+          return (
+            <div
+              key={asset.asset_id}
+              className="overflow-hidden rounded-2xl border border-white/20 bg-white/10 backdrop-blur-sm"
+            >
+              {hasPreview ? (
+                <div className="w-[168px]">
+                  <img
+                    src={asset.data_url}
+                    alt={asset.name}
+                    className="block h-[116px] w-full object-cover"
+                  />
+                  <div className="border-t border-white/15 px-3 py-2 text-left">
+                    <p className="truncate text-xs font-semibold text-white">{asset.name}</p>
+                    <p className="mt-1 text-[11px] text-white/70">{formatAssetSize(asset.size_bytes)}</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex min-w-[180px] items-center gap-3 px-4 py-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-white/10 text-white/80">
+                    {isImage ? <ImagePlus size={16} /> : <Paperclip size={16} />}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-semibold text-white">{asset.name}</p>
+                    <p className="mt-1 text-[11px] text-white/70">{formatAssetSize(asset.size_bytes) || asset.media_type}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function AgentConversationPanel({
   settings,
   messages,
@@ -163,6 +253,8 @@ export function AgentConversationPanel({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  const dragDepthRef = useRef(0);
+  const [isDragActive, setIsDragActive] = useState(false);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -191,6 +283,64 @@ export function AgentConversationPanel({
     }
     event.target.value = '';
   };
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current += 1;
+    if (event.dataTransfer?.types?.includes('Files')) {
+      setIsDragActive(true);
+    }
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
+    if (event.dataTransfer?.types?.includes('Files')) {
+      setIsDragActive(true);
+    }
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDragActive(false);
+    const files = event.dataTransfer?.files ? Array.from(event.dataTransfer.files) : [];
+    if (files.length) {
+      onFilesAdded(files);
+      textareaRef.current?.focus();
+    }
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file instanceof File)
+      .map((file, index) => normalizeClipboardFile(file, index));
+
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    onFilesAdded(files);
+  };
+
+  const imageAssetCount = uploadedAssets.filter((asset) => asset.media_type.startsWith('image/')).length;
 
   return (
     <div className="flex-1 flex flex-col relative bg-[#fcfcfd] overflow-hidden">
@@ -238,6 +388,8 @@ export function AgentConversationPanel({
                           : 'bg-white text-slate-800 border-slate-100 shadow-slate-100/50'
                     }`}
                     >
+                      {isUser && msg.attachments?.length ? renderMessageAttachments(msg.attachments) : null}
+
                       <div className={`max-w-none ${isUser ? 'text-white' : 'prose prose-sm prose-slate prose-p:leading-relaxed prose-headings:mb-3'}`}>
                         {renderMessageContent(msg.content, {
                           textClassName: isUser ? 'text-white/95' : 'text-slate-700',
@@ -355,7 +507,15 @@ export function AgentConversationPanel({
           
           <div className="relative group">
             <div className="absolute inset-0 -m-1 bg-gradient-to-r from-indigo-500/10 via-blue-500/5 to-emerald-500/10 rounded-[1.5rem] blur-2xl opacity-0 group-focus-within:opacity-100 transition duration-1000"></div>
-            <div className="relative bg-white border border-slate-200 rounded-2xl shadow-xl transition-all group-focus-within:border-indigo-300 group-focus-within:shadow-indigo-500/5 overflow-hidden">
+            <div
+              className={`relative bg-white border rounded-2xl shadow-xl transition-all overflow-hidden group-focus-within:border-indigo-300 group-focus-within:shadow-indigo-500/5 ${
+                isDragActive ? 'border-indigo-400 bg-indigo-50/40 shadow-indigo-500/10 ring-2 ring-indigo-200/80' : 'border-slate-200'
+              }`}
+              onDragEnter={handleDragEnter}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
               <div className="flex items-center justify-between px-4 py-1.5 bg-slate-50/50 border-b border-slate-100">
                   <div className="flex items-center space-x-4">
                     <Terminal size={11} className="text-slate-400" />
@@ -376,6 +536,49 @@ export function AgentConversationPanel({
                     />
                   </div>
               </div>
+
+              {isDragActive ? (
+                <div className="pointer-events-none absolute inset-x-4 top-12 z-10 rounded-2xl border border-dashed border-indigo-300 bg-white/92 px-4 py-5 text-center shadow-sm backdrop-blur-sm">
+                  <div className="flex items-center justify-center gap-2 text-indigo-600">
+                    <ImagePlus size={18} />
+                    <span className="text-sm font-semibold">松开即可附加截图或图片</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">支持直接拖进输入框，发送后会自动走多模态识别与讲解。</p>
+                </div>
+              ) : null}
+
+              {uploadedAssets.length > 0 ? (
+                <div className="border-b border-slate-100 bg-slate-50/70 px-4 py-2.5">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-[11px] font-medium text-slate-600">
+                      <Paperclip size={13} className="text-indigo-500" />
+                      <span>已附加 {uploadedAssets.length} 个文件</span>
+                    </div>
+                    {imageAssetCount > 0 ? (
+                      <span className="rounded-full border border-indigo-100 bg-indigo-50 px-2.5 py-1 text-[10px] font-semibold text-indigo-600">
+                        直接发送即可自动识别并讲解图片
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {uploadedAssets.map((asset) => (
+                      <div key={asset.asset_id} className="flex max-w-full items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 shadow-sm">
+                        {asset.media_type.startsWith('image/') ? <ImagePlus size={12} className="text-indigo-500" /> : <Paperclip size={12} className="text-slate-400" />}
+                        <span className="max-w-[220px] truncate font-medium text-slate-700">{asset.name || '未命名附件'}</span>
+                        {asset.size_bytes ? <span className="text-[10px] text-slate-400">{formatAssetSize(asset.size_bytes)}</span> : null}
+                        <button
+                          type="button"
+                          onClick={() => onRemoveAsset(asset.asset_id)}
+                          className="rounded-full p-0.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                          aria-label={`移除附件 ${asset.name}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               
               <div className="flex items-end gap-3 px-4 py-3.5">
                 <textarea
@@ -384,8 +587,9 @@ export function AgentConversationPanel({
                   value={draftMessage}
                   onChange={(e) => onDraftMessageChange(e.target.value)}
                   onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
                   disabled={disabled}
-                  placeholder="Enter standard query, phase diagram generation, or MD invocation logic..."
+                  placeholder="输入问题，或直接拖拽 / 粘贴截图到这里。只附加图片也可以，发送时会自动识别并讲解。"
                   className="flex-1 max-h-32 min-h-[34px] bg-transparent py-2 outline-none text-sm leading-6 text-slate-700 resize-none font-sans"
                   rows={1}
                 />

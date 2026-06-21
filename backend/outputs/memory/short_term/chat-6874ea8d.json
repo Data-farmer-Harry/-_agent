@@ -1,0 +1,40 @@
+{
+  "conversation_id": "chat-6874ea8d",
+  "messages": [
+    {
+      "role": "user",
+      "content": "什么是共析点，它和包晶反应有什么区别？"
+    },
+    {
+      "role": "assistant",
+      "content": "共析点是某一固定成分下，一个固相在固定温度分解成两个固相的点。"
+    }
+  ],
+  "uploaded_assets": [],
+  "recognition_result": null,
+  "last_run_context": {
+    "run_id": "",
+    "route_name": "",
+    "compute_domain": "none",
+    "system_name": "",
+    "final_message": "",
+    "generated_code_preview": "",
+    "review_summary": "",
+    "selected_tool": "",
+    "generation_source": "",
+    "request_summary": "",
+    "review_passed": null,
+    "review_issues": [],
+    "review_advisory_issues": [],
+    "trace_summary": [],
+    "recognition_summary": "",
+    "artifact_names": []
+  },
+  "session_title": "什么是共析点，它和包晶反应有什么区别？",
+  "last_user_message": "什么是共析点，它和包晶反应有什么区别？",
+  "message_count": 2,
+  "asset_count": 0,
+  "summary_version": "v2",
+  "current_context_summary": "ShortTerm: Session: 什么是共析点，它和包晶反应有什么区别？ | RecentTurns: U: 什么是共析点，它和包晶反应有什么区别？ | A: 共析点是某一固定成分下，一个固相在固定温度分解成两个固相的点。 | LongTerm: 材料研究对话：共析点定义为固定成分下单一固相分解成两固相的温度点。用户询问共析点与包晶反应区别，仅获得共析点部分定义。研究系统待完善，用户偏好关注相变机理，未解问题包括包晶反应机制对比。 | Facts: recent_user=什么是共析点，它和包晶反应有什么区别？",
+  "updated_at": "2026-04-05T13:24:34.791560+00:00"
+}

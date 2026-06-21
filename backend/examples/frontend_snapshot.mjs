@@ -140,6 +140,13 @@ async function run() {
   const snapshot = await client.evaluate(`(() => ({
     bodyText: document.body.innerText.slice(0, 4000),
     iframeLength: (document.querySelector('iframe')?.srcdoc || '').length,
+    iframeHasGeneratedSvg: (document.querySelector('iframe')?.srcdoc || '').includes('recognition-generated-svg'),
+    iframeHasReconstructionCanvas: (document.querySelector('iframe')?.srcdoc || '').includes('recognition-reconstruction-canvas'),
+    iframeHasStructuredScene: (document.querySelector('iframe')?.srcdoc || '').includes('reconstruction_scene'),
+    iframeHasStructuredMode: (document.querySelector('iframe')?.srcdoc || '').includes('structured_path_reconstruction'),
+    iframeHasSourceImageLayer: (document.querySelector('iframe')?.srcdoc || '').includes('phase-source-image'),
+    iframeHasRecognizedSourceImage: (document.querySelector('iframe')?.srcdoc || '').includes('recognized-source-image'),
+    iframeHasDataImage: (document.querySelector('iframe')?.srcdoc || '').includes('data:image/png;base64'),
     messages: Array.from(document.querySelectorAll('.conversation-bubble')).map((node) => node.textContent?.trim()),
     statusChips: Array.from(document.querySelectorAll('.status-chip')).map((node) => node.textContent?.trim()),
     summaryCards: Array.from(document.querySelectorAll('.summary-card strong')).map((node) => node.textContent?.trim()),

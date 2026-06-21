@@ -1,0 +1,56 @@
+{
+  "conversation_id": "bench-memory-bfea512c",
+  "messages": [
+    {
+      "role": "user",
+      "content": "后面前端先别动，优先扩 TDB 和后端 memory。"
+    },
+    {
+      "role": "assistant",
+      "content": "当前处于对话模式。"
+    },
+    {
+      "role": "user",
+      "content": "请记住相图结果不要退回示意图。"
+    },
+    {
+      "role": "assistant",
+      "content": "当前处于对话模式。"
+    },
+    {
+      "role": "user",
+      "content": "请基于刚才偏好，告诉我下一步该优先做什么。"
+    },
+    {
+      "role": "assistant",
+      "content": "当前处于对话模式。"
+    }
+  ],
+  "uploaded_assets": [],
+  "recognition_result": null,
+  "last_run_context": {
+    "run_id": "",
+    "route_name": "",
+    "compute_domain": "none",
+    "system_name": "",
+    "final_message": "",
+    "generated_code_preview": "",
+    "review_summary": "",
+    "selected_tool": "",
+    "generation_source": "",
+    "request_summary": "",
+    "review_passed": null,
+    "review_issues": [],
+    "review_advisory_issues": [],
+    "trace_summary": [],
+    "recognition_summary": "",
+    "artifact_names": []
+  },
+  "session_title": "后面前端先别动，优先扩 TDB 和后端 memory。",
+  "last_user_message": "请基于刚才偏好，告诉我下一步该优先做什么。",
+  "message_count": 6,
+  "asset_count": 0,
+  "summary_version": "v2",
+  "current_context_summary": "ShortTerm: Session: 后面前端先别动，优先扩 TDB 和后端 memory。 | RecentTurns: U: 后面前端先别动，优先扩 TDB 和后端 memory。 | A: 当前处于对话模式。 | U: 请记住相图结果不要退回示意图。 | A: 当前处于对话模式。 | U: 请基于刚才偏好，告诉我下一步该优先做什么。 | A: 当前处于对话模式。 | LongTerm: 用户优先扩展TDB和后端memory，暂不动前端。相图结果不退回示意图。研究系统需加强数据库和内存容量。 | Facts: recent_user=请基于刚才偏好，告诉我下一步该优先做什么。 | 后面前端先别动，优先扩 TDB 和后端 memory。 | 请记住相图结果不要退回示意图。 | 请基于刚才偏好，告诉我下一步该优先做什么。 | Preferences: 后面前端先别动，优先扩 TDB 和后端 memory。 | 请记住相图结果不要退回示意图。 | 请基于刚才偏好，告诉我下一步该优先做什么。",
+  "updated_at": "2026-04-07T12:14:48.964729+00:00"
+}

@@ -1,0 +1,19 @@
+{
+  "conversation_id": "chat-39111c17",
+  "summary_version": "v1",
+  "strategic_summary": "材料科学中，共析点为特定成分下单固相在恒温下分解为两固相的临界点。需进一步研究共析与包晶反应差异机制。",
+  "salient_facts": [
+    "recent_user=什么是共析点，它和包晶反应有什么区别？"
+  ],
+  "research_topics": [],
+  "completed_run_summaries": [],
+  "open_questions": [
+    "什么是共析点，它和包晶反应有什么区别？"
+  ],
+  "preferred_tools": [],
+  "user_preferences": [],
+  "retrieval_hints": [],
+  "compression_method": "llm_compaction",
+  "source_message_count": 2,
+  "updated_at": "2026-04-05T13:23:26.546034+00:00"
+}

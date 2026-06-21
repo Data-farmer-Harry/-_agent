@@ -84,6 +84,11 @@ class LLMClient:
             return any(marker in reason_text for marker in cls.TRANSIENT_ERROR_MARKERS)
         return False
 
+    @staticmethod
+    def _uses_dashscope_compatible_api() -> bool:
+        base_url = settings.llm_api_base_url.lower()
+        return "dashscope.aliyuncs.com" in base_url
+
     def _post_messages(self, messages: list[dict[str, Any]], *, max_tokens: int, temperature: float) -> str:
         if not self.is_configured():
             raise RuntimeError("LLM is not configured.")
@@ -95,6 +100,8 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": min(settings.llm_max_tokens, max_tokens),
         }
+        if self._uses_dashscope_compatible_api():
+            payload["enable_thinking"] = settings.llm_enable_thinking
         data = json.dumps(payload).encode("utf-8")
         req = urllib_request.Request(
             endpoint,

@@ -1,6 +1,6 @@
 # Architecture
 
-本文档只描述当前仍然活跃的最小架构，不再追溯旧的 `server/src/html`、旧的 `backend/app/services`，也不把冻结参考目录 `lammps/` 当作主线。
+本文档只描述当前仍然活跃的最小架构，不再追溯旧的 `server/src/html` 和旧的 `backend/app/services`。
 
 ## 一句话概括
 
@@ -44,10 +44,10 @@ flowchart LR
     Python --> Pycalphad["thermo/engine.py"]
     Pycalphad --> TDB["backend/configs/thermo_databases/*.tdb"]
 
-    Lammps --> LammpsRegistry["lammps/registry.py"]
-    Lammps --> LammpsTemplate["lammps/template.py"]
-    Lammps --> LammpsRunner["lammps/runner.py"]
-    Lammps --> LammpsPost["lammps/postprocess.py"]
+    Lammps --> LammpsRegistry["backend/app/lammps/registry.py"]
+    Lammps --> LammpsTemplate["backend/app/lammps/template.py"]
+    Lammps --> LammpsRunner["backend/app/lammps/runner.py"]
+    Lammps --> LammpsPost["backend/app/lammps/postprocess.py"]
     LammpsRunner --> LammpsExec["Local LAMMPS"]
     LammpsPost --> Ovito["OVITO / media outputs"]
 
@@ -200,11 +200,15 @@ memory 不是 agent，只保存：
 
 持久化位置：
 
-- `backend/outputs/memory/<conversation_id>.json`
+- `backend/outputs/memory/memory.sqlite3`
+- `backend/outputs/memory/short_term/`
+- `backend/outputs/memory/long_term/`
 
 ## 当前边界
 
 - 相图真实计算目前只覆盖 registry 中已有 TDB 的体系
 - 识别链路仍是 MVP
 - 前端可以继续独立重做，只要 API 契约不变
-- `lammps/` 冻结参考目录不属于当前主线后端架构
+- 当前 LAMMPS 主线代码只在：
+  - `backend/app/runtimes/lammps.py`
+  - `backend/app/lammps/`
