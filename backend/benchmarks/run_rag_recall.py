@@ -6,7 +6,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
 from typing import Callable
 
 
@@ -24,6 +23,13 @@ from app.thermo.rag_retriever import search_thermo_cards
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "outputs" / "rag_recall" / "latest.json"
 RECALL_KS = (1, 3, 5)
+
+
+def _mean(values) -> float:  # noqa: ANN001
+    sequence = list(values)
+    if not sequence:
+        raise ValueError("mean requires at least one value")
+    return sum(float(value) for value in sequence) / len(sequence)
 
 
 @dataclass(frozen=True)
@@ -202,8 +208,8 @@ def _summarize(results: list[dict[str, object]]) -> dict[str, object]:
         "total_cases": total,
         "hits": len(ranks),
         "misses": total - len(ranks),
-        "mrr": round(mean(1.0 / rank for rank in ranks), 4) if ranks else 0.0,
-        "mean_rank": round(mean(ranks), 3) if ranks else None,
+        "mrr": round(_mean(1.0 / rank for rank in ranks), 4) if ranks else 0.0,
+        "mean_rank": round(_mean(ranks), 3) if ranks else None,
     }
     for k in RECALL_KS:
         hit_count = sum(1 for rank in ranks if rank <= k)

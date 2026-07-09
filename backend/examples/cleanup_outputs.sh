@@ -3,16 +3,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPLY=0
-INCLUDE_VENV=0
 INCLUDE_NODE_MODULES=0
 
 usage() {
   cat <<'EOF'
-Usage: cleanup_outputs.sh [--apply] [--include-venv] [--include-node-modules]
+Usage: cleanup_outputs.sh [--apply] [--include-node-modules]
 
 Default mode is dry-run and only prints generated paths that can be removed.
 Use --apply to actually delete them.
-Use --include-venv only if you are happy to recreate backend/.venv afterwards.
 Use --include-node-modules only if you are happy to reinstall frontend dependencies afterwards.
 
 This script intentionally preserves:
@@ -25,7 +23,6 @@ EOF
 for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
-    --include-venv) INCLUDE_VENV=1 ;;
     --include-node-modules) INCLUDE_NODE_MODULES=1 ;;
     -h|--help)
       usage
@@ -41,12 +38,9 @@ done
 
 targets=(
   "$ROOT/frontend/dist"
+  "$ROOT/.pytest_cache"
   "$ROOT/backend/.pytest_cache"
 )
-
-if [[ "$INCLUDE_VENV" -eq 1 ]]; then
-  targets+=("$ROOT/backend/.venv")
-fi
 
 if [[ "$INCLUDE_NODE_MODULES" -eq 1 ]]; then
   targets+=("$ROOT/frontend/node_modules")

@@ -10,7 +10,6 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +28,13 @@ from app.thermo.rag_retriever import search_thermo_cards
 DEFAULT_DATASET = BACKEND_ROOT / "benchmarks" / "datasets" / "rag_blind_cases.jsonl"
 DEFAULT_OUTPUT = BACKEND_ROOT / "outputs" / "rag_blind" / "latest.json"
 EVAL_KS = (1, 3, 5)
+
+
+def _mean(values) -> float:  # noqa: ANN001
+    sequence = list(values)
+    if not sequence:
+        raise ValueError("mean requires at least one value")
+    return sum(float(value) for value in sequence) / len(sequence)
 
 
 @dataclass(frozen=True)
@@ -101,12 +107,12 @@ def _summarize(results: list[dict[str, object]], *, ranking: str) -> dict[str, o
         "hits_at_pool": len(ranks),
         "misses_at_pool": len(results) - len(ranks),
         "mrr": round(sum(1.0 / rank for rank in ranks) / len(results), 4) if results else 0.0,
-        "mean_rank_of_hits": round(mean(ranks), 3) if ranks else None,
+        "mean_rank_of_hits": round(_mean(ranks), 3) if ranks else None,
     }
     for k in EVAL_KS:
         summary[f"hit@{k}"] = round(sum(rank <= k for rank in ranks) / len(results), 4) if results else 0.0
         summary[f"ndcg@{k}"] = round(
-            mean(float(result[f"{ranking}_ndcg@{k}"]) for result in results),
+            _mean(float(result[f"{ranking}_ndcg@{k}"]) for result in results),
             4,
         ) if results else 0.0
     return summary

@@ -765,6 +765,7 @@ class ChatAgent:
             "domain": filters["domain"],
             "doc_type": filters["doc_type"],
             "material": filters["material"],
+            "evidence_hits": [hit.model_dump(mode="json") for hit in hits],
         }
 
     @staticmethod
@@ -797,6 +798,33 @@ class ChatAgent:
         if self.PERITECTIC_PATTERN.search(request.message):
             return "包晶反应通常指液相与一种固相在固定温度反应，生成另一种固相；它和共析最大的区别是包晶涉及液相，而共析发生在固态。"
         return "当前处于对话模式。你可以继续问材料概念、追问上一轮相图，或者上传截图让我先做识别。"
+
+    @staticmethod
+    def _format_shared_memory_context(state: AgentGraphState) -> str:
+        context = state.get("shared_memory_context") or {}
+        if not isinstance(context, dict) or not context.get("selected_item_ids"):
+            return "(none)"
+        payload = {
+            "selected_item_ids": context.get("selected_item_ids", []),
+            "forced_retention_ids": context.get("forced_retention_ids", []),
+            "retrieval_backend": context.get("retrieval_backend", ""),
+            "items": [
+                {
+                    "memory_id": candidate.get("item", {}).get("memory_id"),
+                    "item_type": candidate.get("item", {}).get("item_type"),
+                    "subject": candidate.get("item", {}).get("subject"),
+                    "predicate": candidate.get("item", {}).get("predicate"),
+                    "value": candidate.get("item", {}).get("value"),
+                    "unit": candidate.get("item", {}).get("unit"),
+                    "text": candidate.get("item", {}).get("text"),
+                    "authority": candidate.get("item", {}).get("authority"),
+                    "reasons": candidate.get("reasons", []),
+                }
+                for candidate in context.get("candidates", [])[:8]
+                if isinstance(candidate, dict)
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     def run(self, state: AgentGraphState) -> dict:
         request = state["request"]
@@ -834,6 +862,7 @@ class ChatAgent:
                         "You are the ChatAgent for a materials research system. "
                         "Answer clearly in Chinese. "
                         "You must use the provided last_run_context, recognition_result, and contextual grounding when relevant. "
+                        "Treat shared memory locked facts as explicit user or execution constraints; do not silently override them. "
                         "When materials RAG context is provided, use it as grounded background knowledge and prefer it over unsupported free-form speculation. "
                         "If the user asks about the previous run, answer from that context instead of pretending nothing happened. "
                         "Do not claim tool execution that did not happen in this turn. "
@@ -847,6 +876,7 @@ class ChatAgent:
                         f"User message:\n{request.message}\n\n"
                         f"Current summary:\n{state.get('current_context_summary', '')}\n\n"
                         f"Retrieved long-term memory:\n{json.dumps(state.get('long_term_memory_hits', []), ensure_ascii=False)}\n\n"
+                        f"Shared memory context:\n{self._format_shared_memory_context(state)}\n\n"
                         f"Last run context:\n{state.get('last_run_context').model_dump_json() if state.get('last_run_context') else '{}'}\n\n"
                         f"Recognition result:\n{state.get('recognition_result').model_dump_json() if state.get('recognition_result') else '{}'}\n\n"
                         f"Materials RAG context:\n{materials_rag_context or '(none)'}\n\n"
@@ -877,13 +907,25 @@ class ChatAgent:
                     "doc_type": materials_rag_payload.get("doc_type"),
                     "material": materials_rag_payload.get("material"),
                     "titles": [hit.document.title for hit in materials_rag_payload.get("hits", [])[:3]],
-                }
+                },
+                "shared_memory_context_used": bool(
+                    isinstance(state.get("shared_memory_context"), dict)
+                    and state.get("shared_memory_context", {}).get("selected_item_ids")
+                ),
             },
             "response_summary": {
                 "materials_rag": {
                     "used": bool(materials_rag_payload.get("hits")),
                     "titles": [hit.document.title for hit in materials_rag_payload.get("hits", [])[:3]],
                 }
+            },
+            "rag_evidence": {
+                "kind": "materials_rag",
+                "query": request.message,
+                "domain": materials_rag_payload.get("domain"),
+                "doc_type": materials_rag_payload.get("doc_type"),
+                "material": materials_rag_payload.get("material"),
+                "hits": materials_rag_payload.get("evidence_hits", []),
             },
             "termination_reason": "conversation_answered",
         }

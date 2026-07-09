@@ -9,6 +9,7 @@ import {
   getRunResultHtml,
   getRunSummary,
   getRuns,
+  resumeJobRequest,
   runAgentChat,
   streamAgentChat,
   streamAgentChatJob,
@@ -16,6 +17,7 @@ import {
 } from '../../services/api'
 import type {
   AgentChatRequest,
+  AgentJobResumeRequest,
   AgentRunResponse,
   AgentStreamEvent,
   ArtifactRef,
@@ -52,6 +54,7 @@ export interface ConversationMessage {
   routeName?: string
   runStatus?: RunStatus | string
   summary?: Record<string, unknown>
+  metadata?: Record<string, unknown>
   attachments?: UploadedAsset[]
 }
 
@@ -131,6 +134,7 @@ function makeArtifactMessage(
   artifactStatus: string,
   artifacts: ArtifactRef[] = [],
   summary: Record<string, unknown> = {},
+  metadata: Record<string, unknown> = {},
   runId = '',
   routeName = '',
   runStatus: RunStatus | string = 'completed',
@@ -145,10 +149,15 @@ function makeArtifactMessage(
     artifactStatus,
     artifacts,
     summary,
+    metadata,
     runId,
     routeName,
     runStatus,
   }
+}
+
+function withJobMetadata(metadata: Record<string, unknown>, jobId: string): Record<string, unknown> {
+  return jobId ? { ...metadata, job_id: jobId } : metadata
 }
 
 function mergeArtifacts(current: ArtifactRef[], incoming: ArtifactRef[]): ArtifactRef[] {
@@ -180,6 +189,7 @@ function upsertArtifactMessage(
     artifactStatus,
     artifacts,
     summary,
+    metadata,
     runId,
     routeName,
     runStatus,
@@ -188,6 +198,7 @@ function upsertArtifactMessage(
     artifactStatus: string
     artifacts: ArtifactRef[]
     summary: Record<string, unknown>
+    metadata?: Record<string, unknown>
     runId: string
     routeName: string
     runStatus: RunStatus | string
@@ -197,7 +208,7 @@ function upsertArtifactMessage(
     return messages
   }
 
-  const nextMessage = makeArtifactMessage(htmlContent, artifactStatus, artifacts, summary, runId, routeName, runStatus)
+  const nextMessage = makeArtifactMessage(htmlContent, artifactStatus, artifacts, summary, metadata || {}, runId, routeName, runStatus)
   const existingIndex = messages.findIndex((message) => message.kind === 'artifact' && message.runId === runId)
   if (existingIndex < 0) {
     return [...messages, nextMessage]
@@ -210,6 +221,7 @@ function upsertArtifactMessage(
     artifactStatus,
     artifacts,
     summary,
+    metadata: { ...(existing.metadata || {}), ...(metadata || {}) },
     routeName,
     runStatus,
   }
@@ -338,13 +350,14 @@ function terminalMessageFromResponse(response: AgentRunResponse): ConversationMe
 }
 
 
-function artifactMessageFromResponse(response: AgentRunResponse): ConversationMessage | null {
+function artifactMessageFromResponse(response: AgentRunResponse, extraMetadata: Record<string, unknown> = {}): ConversationMessage | null {
   if (responseCarriesRenderableArtifact(response)) {
     return makeArtifactMessage(
       response.html_content || '',
       nextStatusMessage(response),
       response.artifacts,
       response.summary || {},
+      { ...(response.metadata || {}), ...extraMetadata },
       response.run_id,
       response.route.name,
       response.run_status
@@ -353,12 +366,12 @@ function artifactMessageFromResponse(response: AgentRunResponse): ConversationMe
   return null
 }
 
-function responseMessagesFromRun(response: AgentRunResponse): ConversationMessage[] {
+function responseMessagesFromRun(response: AgentRunResponse, extraMetadata: Record<string, unknown> = {}): ConversationMessage[] {
   const messages: ConversationMessage[] = []
   if (response.recognition_result && (response.route.name === 'recognition.analyze' || response.route.name === 'mixed.request')) {
     messages.push(makeRecognitionMessage(response.recognition_result))
   }
-  const artifactMessage = artifactMessageFromResponse(response)
+  const artifactMessage = artifactMessageFromResponse(response, extraMetadata)
   if (artifactMessage) {
     messages.push(artifactMessage)
   }
@@ -382,6 +395,7 @@ function mergeResponseMessages(
         artifactStatus: message.artifactStatus || '',
         artifacts: message.artifacts || response.artifacts || [],
         summary: message.summary || response.summary || {},
+        metadata: message.metadata || response.metadata || {},
         runId: response.run_id,
         routeName: response.route.name,
         runStatus: response.run_status,
@@ -671,6 +685,7 @@ function persistAgentState(state: AgentChatState): void {
 
 function applyAgentRunResponse(state: AgentChatState, response: AgentRunResponse): AgentChatState {
   const expectsPhaseArtifact = response.success && responseCarriesRenderableArtifact(response) && hasHtmlArtifact(response)
+  const responseMetadata = withJobMetadata(response.metadata || {}, state.jobId)
   return {
     ...state,
     conversationId: response.conversation_id || state.conversationId,
@@ -678,7 +693,7 @@ function applyAgentRunResponse(state: AgentChatState, response: AgentRunResponse
     route: response.route || state.route,
     planSteps: response.plan_steps || state.planSteps,
     timeline: response.trace || state.timeline,
-    responseMetadata: response.metadata || {},
+    responseMetadata,
     recognitionResult: response.recognition_result || null,
     artifacts: response.artifacts || [],
     summary: response.summary || {},
@@ -792,6 +807,7 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
       return {
         ...state,
         jobId: action.jobId,
+        responseMetadata: withJobMetadata(state.responseMetadata, action.jobId),
         status: 'streaming',
         isLoading: true,
         statusMessage: action.message,
@@ -847,6 +863,7 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
                 artifactStatus: observation.summary,
                 artifacts: mergedArtifacts,
                 summary: nextSummary,
+                metadata: state.responseMetadata,
                 runId: event.run_id || state.runId,
                 routeName: state.route?.name || '',
                 runStatus: 'running',
@@ -876,7 +893,7 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
           }
         }
         const nextState = applyAgentRunResponse(state, response)
-        const responseMessages = responseMessagesFromRun(response)
+        const responseMessages = responseMessagesFromRun(response, state.jobId ? { job_id: state.jobId } : {})
         return responseMessages.length
           ? {
               ...nextState,
@@ -898,7 +915,7 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
     }
     case 'response_received': {
       const nextState = applyAgentRunResponse(state, action.response)
-      const responseMessages = responseMessagesFromRun(action.response)
+      const responseMessages = responseMessagesFromRun(action.response, state.jobId ? { job_id: state.jobId } : {})
       return responseMessages.length
         ? {
             ...nextState,
@@ -928,6 +945,7 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
           artifactStatus: state.route?.name === 'recognition.analyze' ? '识别模拟器已加载。' : '相图结果页已加载。',
           artifacts: state.artifacts,
           summary: state.summary,
+          metadata: state.responseMetadata,
           runId: state.runId,
           routeName: state.route?.name || '',
           runStatus: state.runStatus,
@@ -1192,6 +1210,63 @@ export function useAgentChat(settings: ClientSettings) {
     [handleStreamEvent, loadResultHtml, refreshRunHistory, settings, state, waitForJobTerminalResult, waitForRunTerminalStatus],
   )
 
+  const resumeJob = useCallback(
+    async (jobId: string, payload: AgentJobResumeRequest) => {
+      dispatch({
+        type: 'status_updated',
+        message: '正在提交 checkpoint 恢复 attempt。',
+        status: 'streaming',
+        isLoading: true,
+      })
+      let streamedRunId = ''
+      let streamStarted = false
+      const trackedHandleStreamEvent = (event: AgentStreamEvent) => {
+        if (event.type === 'run_started' && event.run_id) {
+          streamedRunId = event.run_id
+          streamStarted = true
+        }
+        handleStreamEvent(event)
+      }
+
+      try {
+        const response = await resumeJobRequest(settings, jobId, payload)
+        const resumedJobId = response.resumed_job.job_id
+        dispatch({
+          type: 'job_submitted',
+          jobId: resumedJobId,
+          message: response.message || response.resumed_job.progress_message || '恢复 attempt 已进入后台队列。',
+        })
+        try {
+          await streamAgentChatJob(settings, resumedJobId, trackedHandleStreamEvent)
+        } catch {
+          dispatch({
+            type: 'status_updated',
+            message: streamStarted
+              ? '恢复 attempt 的事件流中断了，我正在继续轮询当前 run 状态。'
+              : '恢复 attempt 已提交，我正在继续轮询后台 job 结果。',
+            status: 'streaming',
+            isLoading: true,
+          })
+          const record = streamStarted && streamedRunId
+            ? await waitForRunTerminalStatus(streamedRunId)
+            : await waitForJobTerminalResult(resumedJobId)
+          const runResponse = responseFromRunRecord(record)
+          dispatch({ type: 'response_received', response: runResponse })
+          if (responseCarriesRenderableArtifact(runResponse) && hasHtmlArtifact(runResponse)) {
+            await loadResultHtml(runResponse)
+          }
+        }
+        await refreshRunHistory()
+      } catch (error) {
+        dispatch({
+          type: 'run_failed',
+          message: formatAgentRequestError(error instanceof Error ? error.message : '恢复 attempt 提交失败。', settings.apiBaseUrl),
+        })
+      }
+    },
+    [handleStreamEvent, loadResultHtml, refreshRunHistory, settings, waitForJobTerminalResult, waitForRunTerminalStatus],
+  )
+
   const loadRun = useCallback(
     async (runId: string) => {
       const record = await getRunSummary(settings, runId)
@@ -1285,11 +1360,12 @@ export function useAgentChat(settings: ClientSettings) {
       liveProgress,
       runHistory,
       sendMessage,
+      resumeJob,
       loadRun,
       cancelCurrentRun,
       refreshRunHistory,
       resetConversation,
     }),
-    [cancelCurrentRun, liveProgress, loadRun, refreshRunHistory, resetConversation, runHistory, sendMessage, state],
+    [cancelCurrentRun, liveProgress, loadRun, refreshRunHistory, resetConversation, resumeJob, runHistory, sendMessage, state],
   )
 }

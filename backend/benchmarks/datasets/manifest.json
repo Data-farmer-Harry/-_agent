@@ -1,7 +1,7 @@
 {
-  "benchmark_version": "2026-04-09-v2",
-  "dataset_count": 11,
-  "cases_total": 71,
+  "benchmark_version": "2026-06-23-v5",
+  "dataset_count": 22,
+  "cases_total": 390,
   "datasets": {
     "routing_cases": 10,
     "phase_parsing_cases": 6,
@@ -9,11 +9,22 @@
     "phase_execution_cases": 29,
     "lammps_contract_cases": 3,
     "lammps_e2e_cases": 3,
+    "lammps_quality_cases": 6,
+    "lammps_red_blue_cases": 7,
+    "review_json_fallback_cases": 5,
+    "orchestration_cases": 5,
+    "judge_calibration_cases": 31,
+    "lammps_recovery_cases": 4,
     "recognition_cases": 3,
     "external_recognition_cases": 4,
     "memory_followup_cases": 2,
     "memory_retrieval_cases": 1,
-    "mcp_cases": 6
+    "shared_memory_cases": 4,
+    "memory_conflict_cases": 4,
+    "context_compression_cases": 3,
+    "materials_multihop_cases": 3,
+    "mcp_cases": 6,
+    "rag_blind_cases": 247
   },
   "supported_lammps_materials": [
     "Al",

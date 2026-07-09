@@ -147,6 +147,126 @@ export interface ResultProfile {
   evidence: string[]
 }
 
+export interface PhysicalQualityReport {
+  schema_version?: string
+  run_mode?: 'real' | 'mock'
+  passed?: boolean
+  scientific_result_passed?: boolean
+  synthetic_thermo?: boolean
+  thermo_rows?: number
+  max_step?: number
+  requested_steps?: number
+  step_coverage?: number
+  final_temperature?: number | null
+  average_temperature?: number | null
+  temperature_deviation?: number | null
+  final_total_energy?: number | null
+  normalized_energy_drift?: number | null
+  max_pressure?: number | null
+  pressure_outlier_fraction?: number
+  has_nan_or_inf?: boolean
+  dump_exists?: boolean
+  atom_count_valid?: boolean
+  log_errors?: string[]
+  issues?: string[]
+  warnings?: string[]
+  thresholds?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}
+
+export interface LammpsEvidenceRef {
+  evidence_id?: string
+  source_type?: string
+  source_ref?: string
+  claim?: string
+  authority?: string
+  content_hash?: string
+  supports?: string[]
+  metadata?: Record<string, unknown>
+}
+
+export interface LammpsReviewFinding {
+  finding_id?: string
+  dimension?: string
+  severity?: 'info' | 'warning' | 'blocking' | string
+  message?: string
+  evidence_refs?: string[]
+  repairable?: boolean
+  suggested_action?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface LammpsReviewScore {
+  factual_correctness?: number
+  logical_consistency?: number
+  script_safety?: number
+  physical_validity?: number
+  evidence_quality?: number
+  overall_score?: number
+  blocking_findings?: number
+  locked_constraint_violations?: number
+  hard_gate_passed?: boolean
+  score_source?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface LammpsReviewPayload {
+  summary?: string
+  passed?: boolean
+  confidence?: number
+  review_mode?: string
+  issues?: string[]
+  advisory_issues?: string[]
+  llm_blocking_candidates?: string[]
+  red_review?: {
+    phase?: string
+    passed?: boolean
+    summary?: string
+    findings?: LammpsReviewFinding[]
+    score?: LammpsReviewScore
+    evidence_refs?: LammpsEvidenceRef[]
+    metadata?: Record<string, unknown>
+  }
+  score?: LammpsReviewScore
+  findings?: LammpsReviewFinding[]
+  evidence_refs?: LammpsEvidenceRef[]
+  llm_review_parse_audit?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}
+
+export interface LammpsRepairHistoryEntry {
+  entry_type?: string
+  stage?: string
+  issues?: string[]
+  raw_payload?: Record<string, unknown>
+  blue_parse_audit?: Record<string, unknown>
+  patch?: {
+    schema_version?: string
+    patch_id?: string
+    operations?: Array<Record<string, unknown>>
+    requires_user_confirmation?: boolean
+    risk?: string
+    source?: string
+    metadata?: Record<string, unknown>
+  }
+  policy_report?: {
+    accepted?: boolean
+    request_changed?: boolean
+    requires_user_confirmation?: boolean
+    risk?: string
+    applied_operations?: Array<Record<string, unknown>>
+    rejected_operations?: Array<Record<string, unknown>>
+    locked_constraint_violations?: string[]
+    verification_steps?: string[]
+    termination_reason?: string
+    before_request?: Record<string, unknown>
+    after_request?: Record<string, unknown>
+    validation_report?: Record<string, unknown>
+    metadata?: Record<string, unknown>
+  }
+  convergence_report?: Record<string, unknown>
+}
+
 export interface ArtifactRef {
   kind: ArtifactKind
   name: string
@@ -252,6 +372,11 @@ export interface AgentJobRecord {
   result_run_id: string
   error: string
   event_count: number
+  attempt: number
+  source_job_id: string
+  source_run_id: string
+  source_checkpoint_id: string
+  resume_mode: string
 }
 
 export interface AgentJobListResponse {
@@ -263,6 +388,22 @@ export interface AgentJobResultResponse {
   ready: boolean
   job: AgentJobRecord
   run: RunRecordSummary | null
+}
+
+export interface AgentJobResumeRequest {
+  message?: string
+  checkpoint_id?: string
+  strategy?: string
+}
+
+export interface AgentJobResumeResponse {
+  source_job: AgentJobRecord
+  resumed_job: AgentJobRecord
+  source_run_id: string
+  source_run_available: boolean
+  checkpoint_id: string
+  resume_mode: string
+  message: string
 }
 
 export interface LlmRuntimeConfig {

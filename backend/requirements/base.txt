@@ -1,0 +1,14 @@
+# Core backend and scientific-computing dependencies.
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+pydantic==2.11.3
+langgraph==0.2.56
+numpy==2.2.4
+pandas==2.2.3
+scipy==1.15.2
+matplotlib==3.10.8
+pillow==12.1.1
+plotly==6.0.1
+pycalphad==0.11.0
+sqlite-vec==0.1.9
+requests==2.32.5

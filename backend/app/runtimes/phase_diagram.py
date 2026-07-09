@@ -317,6 +317,7 @@ class PhaseDiagramRuntime:
         existing_plan_steps: list[PlanStep] | None = None,
         existing_trace: list[ToolObservation] | None = None,
         existing_artifacts: list[ArtifactRef] | None = None,
+        shared_memory_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         route = TaskRoute(
             name="phase_diagram.generate" if (decision or {}).get("route_name") != "mixed.request" else "mixed.request",
@@ -346,6 +347,7 @@ class PhaseDiagramRuntime:
             "accuracy": {"available": False, "passed": False},
             "current_code_filename": settings.code_file_name,
             "event_sink": event_sink,
+            "shared_memory_context": shared_memory_context or {},
         }
         initialize_runtime_state(
             state,
@@ -401,6 +403,7 @@ class PhaseDiagramRuntime:
         thermo_card, retrieval = self.phase_agent_service.lookup_registered_database(
             diagram_request.system_name,
             query_text=thermo_query_text,
+            allow_rag_auto_select=not bool(planning.get("explicit_system")),
         )
         state["thermo_lookup"] = retrieval
         if thermo_card is None:
@@ -670,6 +673,7 @@ class PhaseDiagramRuntime:
         existing_plan_steps: list[PlanStep] | None = None,
         existing_trace: list[ToolObservation] | None = None,
         existing_artifacts: list[ArtifactRef] | None = None,
+        shared_memory_context: dict[str, Any] | None = None,
     ) -> AgentRunResponse:
         state = self._build_state(
             run_id=run_id,
@@ -678,6 +682,7 @@ class PhaseDiagramRuntime:
             existing_plan_steps=existing_plan_steps,
             existing_trace=existing_trace,
             existing_artifacts=existing_artifacts,
+            shared_memory_context=shared_memory_context,
         )
         diagram_request, planning = self._build_request(request, recognition_result)
         return self._run_with_structured_request(
@@ -702,6 +707,7 @@ class PhaseDiagramRuntime:
         existing_plan_steps: list[PlanStep] | None = None,
         existing_trace: list[ToolObservation] | None = None,
         existing_artifacts: list[ArtifactRef] | None = None,
+        shared_memory_context: dict[str, Any] | None = None,
     ) -> AgentRunResponse:
         state = self._build_state(
             run_id=run_id,
@@ -710,6 +716,7 @@ class PhaseDiagramRuntime:
             existing_plan_steps=existing_plan_steps,
             existing_trace=existing_trace,
             existing_artifacts=existing_artifacts,
+            shared_memory_context=shared_memory_context,
         )
         structured_request = (
             diagram_request if isinstance(diagram_request, DiagramRequest) else DiagramRequest.model_validate(diagram_request)
@@ -758,6 +765,7 @@ class PhaseDiagramRuntime:
                 "generation_source": state.get("generation_source", ""),
                 "review": state.get("review", {}),
                 "accuracy": state.get("accuracy", {}),
+                "shared_memory": state.get("shared_memory_context", {}),
                 "runtime_profile": runtime_profile,
             },
         )
@@ -777,6 +785,7 @@ class PhaseDiagramRuntime:
             "accuracy": state.get("accuracy", {}),
             "review": state.get("review", {}),
             "planning": state.get("planning", {}),
+            "shared_memory": state.get("shared_memory_context", {}),
             "result_profile": result_profile,
             "runtime_profile": runtime_profile,
         }
@@ -801,6 +810,7 @@ class PhaseDiagramRuntime:
                 "generation_source": state.get("generation_source", ""),
                 "review": state.get("review", {}),
                 "accuracy": state.get("accuracy", {}),
+                "shared_memory": state.get("shared_memory_context", {}),
                 "result_profile": result_profile,
                 "runtime_profile": runtime_profile,
             },

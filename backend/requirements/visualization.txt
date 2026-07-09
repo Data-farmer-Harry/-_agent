@@ -1,0 +1,4 @@
+# Optional heavy visualization stack used for OVITO trajectory media.
+# The backend remains usable without this file, but OVITO GIF/MP4 artifacts
+# require either this package or a separately installed ovitos executable.
+ovito==3.15.1

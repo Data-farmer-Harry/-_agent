@@ -1,8 +1,11 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
+const DEFAULT_IMAGE_PATH = path.resolve(SCRIPT_DIR, '../benchmarks/assets/external_phase_diagrams/al_ni_pmc_phase_diagram.jpg')
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://127.0.0.1:5174/'
 const DEBUG_URL = process.env.CHROME_DEBUG_URL || 'http://127.0.0.1:9222/json/list'
-const IMAGE_PATH =
-  process.env.RECOGNITION_IMAGE_PATH ||
-  '/Users/harry/Desktop/相图计算/phase_diagram_agent/backend/benchmarks/assets/external_phase_diagrams/al_ni_pmc_phase_diagram.jpg'
+const IMAGE_PATH = process.env.RECOGNITION_IMAGE_PATH || DEFAULT_IMAGE_PATH
 const PROMPT = process.env.AGENT_PROMPT || '请识别这张相图截图，并提取体系、坐标轴和主要相区。'
 const WAIT_TIMEOUT_MS = Number(process.env.SMOKE_WAIT_TIMEOUT_MS || 240000)
 

@@ -207,6 +207,8 @@ class PhaseDiagramAgentService:
                         "source": "llm_request_interpreter",
                         "confidence": confidence,
                         "message": message,
+                        "explicit_system": explicit_system,
+                        "fallback_system_name": fallback_request.system_name,
                     }
                 if settings.require_llm_for_agents:
                     raise LLMRequiredError("PhaseDiagramAgent 需要 LLM 解析结构化相图请求，但本次没有得到有效 JSON。")
@@ -220,6 +222,8 @@ class PhaseDiagramAgentService:
             "source": "heuristic_request_interpreter",
             "confidence": 0.6,
             "message": message,
+            "explicit_system": explicit_system,
+            "fallback_system_name": fallback_request.system_name,
         }
 
     @staticmethod
@@ -380,6 +384,7 @@ class PhaseDiagramAgentService:
         *,
         query_text: str = "",
         use_rag: bool | None = None,
+        allow_rag_auto_select: bool = True,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         card, retrieval = retrieve_thermo_database(system_name)
         if card is None:
@@ -387,7 +392,7 @@ class PhaseDiagramAgentService:
             if rag_enabled:
                 rag_query = query_text.strip() or system_name
                 rag_card, rag_retrieval = ThermoRagService.retrieve(rag_query)
-                if rag_card is not None:
+                if rag_card is not None and allow_rag_auto_select:
                     return rag_card, {
                         **rag_retrieval,
                         "matched": True,
@@ -398,6 +403,7 @@ class PhaseDiagramAgentService:
                     **retrieval,
                     "lookup_mode": "exact_then_rag",
                     "rag": rag_retrieval,
+                    "rag_auto_select_suppressed": bool(rag_card),
                 }
             return None, retrieval
         return card.public_payload(), {

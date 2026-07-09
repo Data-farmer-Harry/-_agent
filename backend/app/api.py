@@ -16,9 +16,10 @@ from app.config import llm_config_public_payload, settings, update_runtime_llm_c
 from app.core.cancellation import cancel_run
 from app.diagnostics import build_system_diagnostics
 from app.core.llm import LLMRequiredError
-from app.core.observability import log_event
+from app.core.observability import log_event, new_request_id
 from app.jobs import AgentJobStore, AgentJobWorker, TerminalJobStatus
 from app.memory import MemoryStore
+from app.shared_memory import SharedMemoryService
 from app.lammps import get_lammps_registry_payload, lammps_config_public_payload, update_runtime_lammps_config
 from app.materials_rag.service import MaterialsRagService
 from app.rag.data_manager import RagDataManager
@@ -30,6 +31,8 @@ from app.state import (
     AgentChatRequest,
     AgentJobListResponse,
     AgentJobRecord,
+    AgentJobResumeRequest,
+    AgentJobResumeResponse,
     AgentRunResponse,
     AgentStreamEvent,
     ConversationSnapshotResponse,
@@ -53,6 +56,7 @@ from app.utils.path_utils import ensure_directory
 class AppDependencies:
     artifact_service: ArtifactService
     memory_store: MemoryStore
+    shared_memory_service: SharedMemoryService
     job_store: AgentJobStore
     job_worker: AgentJobWorker
     supervisor_agent: SupervisorAgent
@@ -68,6 +72,7 @@ def build_app_dependencies(
     *,
     artifact_service: ArtifactService | None = None,
     memory_store: MemoryStore | None = None,
+    shared_memory_service: SharedMemoryService | None = None,
     job_store: AgentJobStore | None = None,
     job_worker: AgentJobWorker | None = None,
     supervisor_agent: SupervisorAgent | None = None,
@@ -79,6 +84,7 @@ def build_app_dependencies(
 ) -> AppDependencies:
     artifact_service = artifact_service or ArtifactService(root_dir=settings.tmp_dir)
     memory_store = memory_store or MemoryStore(root_dir=settings.tmp_dir)
+    shared_memory_service = shared_memory_service or SharedMemoryService(root_dir=memory_store.paths.root_dir)
     supervisor_agent = supervisor_agent or SupervisorAgent()
     recognition_agent = recognition_agent or RecognitionAgent(artifact_service=artifact_service)
     phase_diagram_runtime = phase_diagram_runtime or PhaseDiagramRuntime(artifact_service=artifact_service)
@@ -91,6 +97,7 @@ def build_app_dependencies(
     agent_graph = AgentAppGraph(
         artifact_service=artifact_service,
         memory_store=memory_store,
+        shared_memory_service=shared_memory_service,
         supervisor=supervisor_agent,
         recognition_agent=recognition_agent,
         compute_agent=compute_agent,
@@ -101,6 +108,7 @@ def build_app_dependencies(
     return AppDependencies(
         artifact_service=artifact_service,
         memory_store=memory_store,
+        shared_memory_service=shared_memory_service,
         job_store=job_store,
         job_worker=job_worker,
         supervisor_agent=supervisor_agent,
@@ -116,6 +124,7 @@ def build_app_dependencies(
 app_dependencies = build_app_dependencies()
 artifact_service = app_dependencies.artifact_service
 memory_store = app_dependencies.memory_store
+shared_memory_service = app_dependencies.shared_memory_service
 job_store = app_dependencies.job_store
 job_worker = app_dependencies.job_worker
 supervisor_agent = app_dependencies.supervisor_agent
@@ -334,7 +343,9 @@ def create_app(dependencies: AppDependencies | None = None) -> FastAPI:
 
     @app.get("/api/conversations/{conversation_id}/memory-profile")
     def get_conversation_memory_profile(conversation_id: str) -> JSONResponse:
-        return JSONResponse(deps.memory_store.profile(conversation_id))
+        profile = deps.memory_store.profile(conversation_id)
+        profile["shared_memory"] = deps.shared_memory_service.profile()
+        return JSONResponse(profile)
 
     @app.post("/api/runs/{run_id}/cancel")
     def cancel_running_run(run_id: str) -> JSONResponse:
@@ -441,6 +452,110 @@ def create_app(dependencies: AppDependencies | None = None) -> FastAPI:
                 "job": record.model_dump(mode="json"),
                 "run": run_record.model_dump(mode="json"),
             }
+        )
+
+    @app.post("/api/jobs/{job_id}/resume", response_model=AgentJobResumeResponse)
+    def resume_job(job_id: str, request: AgentJobResumeRequest | None = None) -> AgentJobResumeResponse:
+        source_job = deps.job_store.get(job_id)
+        if source_job is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        if source_job.status not in TerminalJobStatus:
+            raise HTTPException(status_code=409, detail="Only terminal jobs can be resumed as a new attempt.")
+        source_request = deps.job_store.load_request(job_id)
+        if source_request is None:
+            raise HTTPException(status_code=409, detail="Original job request payload is missing.")
+
+        resume_request = request or AgentJobResumeRequest()
+        source_run_id = source_job.result_run_id or source_job.run_id
+        source_run = deps.artifact_service.load_run_summary(source_run_id) if source_run_id else None
+        source_summary = source_run.summary if source_run and isinstance(source_run.summary, dict) else {}
+        source_metadata = source_run.metadata if source_run and isinstance(source_run.metadata, dict) else {}
+        lifecycle = source_summary.get("lifecycle") or source_metadata.get("lifecycle") or {}
+        partial_report = source_summary.get("partial_report") or source_metadata.get("partial_report") or {}
+        preflight_dag = source_summary.get("preflight_dag") or source_metadata.get("preflight_dag") or {}
+        degradation = {}
+        if isinstance(preflight_dag, dict):
+            metadata = preflight_dag.get("metadata")
+            if isinstance(metadata, dict) and isinstance(metadata.get("degradation"), dict):
+                degradation = metadata["degradation"]
+        checkpoint_id = resume_request.checkpoint_id.strip()
+        if not checkpoint_id and isinstance(partial_report, dict):
+            checkpoint_id = str(partial_report.get("last_checkpoint_id") or "").strip()
+        if not checkpoint_id and isinstance(lifecycle, dict):
+            checkpoint_id = str(lifecycle.get("last_checkpoint_id") or "").strip()
+        failed_nodes: list[str] = []
+        invalidated_nodes: list[str] = []
+        reused_nodes: list[str] = []
+        if isinstance(degradation, dict):
+            invalidated_nodes = [str(item) for item in degradation.get("invalidated_nodes", []) if str(item).strip()] if isinstance(degradation.get("invalidated_nodes"), list) else []
+            reused_nodes = [str(item) for item in degradation.get("reused_nodes", []) if str(item).strip()] if isinstance(degradation.get("reused_nodes"), list) else []
+            failure_batch = degradation.get("failure_batch")
+            if isinstance(failure_batch, dict):
+                if isinstance(failure_batch.get("failed_nodes"), list):
+                    failed_nodes = [str(item) for item in failure_batch["failed_nodes"] if str(item).strip()]
+                elif isinstance(failure_batch.get("findings"), list):
+                    failed_nodes = [
+                        str(item.get("node_id"))
+                        for item in failure_batch["findings"]
+                        if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+                    ]
+
+        default_message = "\n".join(
+            [
+                f"请基于上一轮 job_id={source_job.job_id} / run_id={source_run_id or 'unknown'} 创建新的恢复 attempt。",
+                f"checkpoint_id={checkpoint_id or 'none'}；strategy={resume_request.strategy or 'checkpoint_context'}。",
+                f"failed_nodes={', '.join(failed_nodes) if failed_nodes else 'none'}；invalidated_nodes={', '.join(invalidated_nodes) if invalidated_nodes else 'none'}；reused_nodes={', '.join(reused_nodes) if reused_nodes else 'auto'}。",
+                "请复用安全的 preflight/checkpoint 上下文，但不要声称已经原地恢复真实 LAMMPS timestep；如果不能安全复用，请重新规划并说明原因。",
+            ]
+        )
+        message = resume_request.message.strip() or default_message
+        notes_suffix = (
+            "\n\n[resume_context]\n"
+            f"source_job_id={source_job.job_id}\n"
+            f"source_run_id={source_run_id}\n"
+            f"checkpoint_id={checkpoint_id}\n"
+            f"resume_mode=new_attempt_with_checkpoint_context\n"
+            "backend_resume_api_v1=true\n"
+        )
+        next_request = source_request.model_copy(
+            update={
+                "request_id": new_request_id(),
+                "message": message,
+                "notes": f"{source_request.notes}{notes_suffix}",
+                "last_run_context": deps.agent_graph.last_run_context_from_record(source_run)
+                if source_run is not None
+                else source_request.last_run_context,
+            }
+        )
+        deps.job_worker.start()
+        resume_mode = "new_attempt_with_checkpoint_context"
+        resumed_job = deps.job_worker.submit_agent_chat(
+            next_request,
+            job_type="agent_resume",
+            attempt=source_job.attempt + 1,
+            source_job_id=source_job.job_id,
+            source_run_id=source_run_id,
+            source_checkpoint_id=checkpoint_id,
+            resume_mode=resume_mode,
+        )
+        log_event(
+            "api.job_resume_submitted",
+            request_id=resumed_job.request_id,
+            job_id=resumed_job.job_id,
+            conversation_id=resumed_job.conversation_id,
+            message="Resume job submitted as a new attempt with checkpoint context.",
+            source_job_id=source_job.job_id,
+            source_run_id=source_run_id,
+            checkpoint_id=checkpoint_id,
+        )
+        return AgentJobResumeResponse(
+            source_job=source_job,
+            resumed_job=resumed_job,
+            source_run_id=source_run_id,
+            source_run_available=source_run is not None,
+            checkpoint_id=checkpoint_id,
+            resume_mode=resume_mode,
+            message="已创建新的恢复 attempt；旧 run 保持只读，真实 LAMMPS 不做危险的 timestep 原地续跑。",
         )
 
     @app.post("/api/jobs/{job_id}/cancel", response_model=AgentJobRecord)

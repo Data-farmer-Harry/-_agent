@@ -15,6 +15,25 @@ phase_diagram_agent/
 └── README.md
 ```
 
+## Python 环境
+
+后端统一使用 Python 3.12 的 `lammps_agent` Conda 环境，不再在仓库内保留 `.venv`。
+
+```bash
+conda env create -f backend/requirements/environment.yml
+conda run -n lammps_agent python -m pip install -r backend/requirements/all.txt
+conda activate lammps_agent
+```
+
+如果本机已经有 `lammps_agent` 环境，改用：
+
+```bash
+conda env update -n lammps_agent -f backend/requirements/environment.yml
+conda run -n lammps_agent python -m pip install -r backend/requirements/all.txt
+```
+
+分层依赖、可选 OVITO 可视化依赖与外部 LAMMPS/ffmpeg 要求见 `backend/requirements/README.md`。
+
 ## 项目定位
 
 这个项目不是单纯的聊天机器人，而是一个面向材料科研任务的 agent 工作台：
@@ -74,7 +93,7 @@ phase_diagram_agent/
   - 检索：保留 structured lexical + BM25，dense candidate 由 sqlite-vec cosine KNN 执行后加权融合。
   - 索引复用：按语料 content digest 和 embedding signature 判断失效；进程重启不会重复 embedding 未变的文档。
   - Wikipedia 语料：`backend/configs/materials_rag_wikipedia.jsonl`，当前包含 55 个材料主题、109 个知识块，每条保留来源 URL、revision 和 CC BY-SA 归属。
-  - 可重复抓取：`cd backend && ./.venv/bin/python examples/build_wikipedia_materials_rag.py --resume --allow-failures`。
+  - 可重复抓取：`cd backend && conda run -n lammps_agent python examples/build_wikipedia_materials_rag.py --resume --allow-failures`。
 - Provenance / Reproducibility
   - 文件：`backend/app/core/provenance.py`
   - 输出：每次 run 自动写入 `provenance.json`
@@ -108,7 +127,7 @@ phase_diagram_agent/
   - 作用：明确展示 short-term / long-term memory 的存储、容量、压缩和检索状态。
 - Benchmark
   - 文件：`backend/benchmarks/run_benchmarks.py`
-  - 命令：`cd backend && ./.venv/bin/python benchmarks/run_benchmarks.py run-all`
+  - 命令：`cd backend && conda run -n lammps_agent python benchmarks/run_benchmarks.py run-all`
   - 作用：固化路由准确率、RAG 召回率、相图成功率、LAMMPS artifact 完整率、平均耗时等指标。
 - Frontend Smoke
   - 文件：`backend/examples/frontend_health_check_smoke.mjs`
@@ -337,7 +356,7 @@ RAG 相关文件：
 
 召回评测脚本：
 
-- `cd backend && ./.venv/bin/python benchmarks/run_rag_recall.py --require-remote`
+- `cd backend && conda run -n lammps_agent python benchmarks/run_rag_recall.py --require-remote`
 - 输出：`backend/outputs/rag_recall/latest.json`
 
 相关文件：
@@ -370,7 +389,7 @@ LAMMPS 生成保留真实本地执行路径：
 
 - 入口：`backend/app/mcp_server.py`
 - 运行方式：
-  - `cd backend && ./.venv/bin/python -m app.mcp_server`
+  - `cd backend && conda run -n lammps_agent python -m app.mcp_server`
 
 当前已暴露的 MCP tools：
 
@@ -420,21 +439,111 @@ LAMMPS 生成保留真实本地执行路径：
 
 - benchmark 这条线已经不只是设计文档，当前 builder / runner / datasets / tests 都已落地
 - 当前已生成：
-  - `9` 份 benchmark dataset
-  - `64` 条 benchmark case
+  - `22` 份 benchmark dataset
+  - `390` 条 benchmark case
 - 当前已通过：
-  - `cd backend && ./.venv/bin/python benchmarks/build_datasets.py`
-  - `cd backend && ./.venv/bin/python benchmarks/run_benchmarks.py validate`
-  - `cd backend && ./.venv/bin/python -m unittest tests.test_benchmark_assets`
-- 当前已验证通过的 deterministic suite：
-  - `routing`：`10/10`
-  - `recognition`：`3/3`
-  - `memory_followup`：`2/2`
-  - `memory_retrieval`：`1/1`
-  - `mcp`：`6/6`
-  - `lammps_contract`：`3/3`
-  - `phase_execution --limit 5`：`5/5`
-- 完整 `phase_execution` 全量执行集可继续单独跑，用于更重的科学 fidelity 回归
+  - `cd backend && conda run -n lammps_agent python benchmarks/build_datasets.py`
+  - `cd backend && conda run -n lammps_agent python benchmarks/run_benchmarks.py validate`
+  - `cd backend && conda run -n lammps_agent python benchmarks/build_materials_agent_bench.py --output-dir /tmp/materials_agent_bench_quick_ci --summary-only`
+  - `make test-materials-bench-freeze`
+  - `make test-quick`
+- 当前 `MaterialsAgentBench` adapter 会把旧 suite 映射成统一 schema，并用 `backend/benchmarks/datasets/materials_agent_bench.freeze.json` 锁定 390 条 case / 250 条 frozen case 的 frozen split hash 与数据防泄漏结果
+- 当前 Judge 层先落地为离线 contract / calibration benchmark：验证 blinded input、JSON fallback、hard-gate 不可覆盖、drift 检查与后端能力矩阵，不会调用线上 LLM 或写入 API key
+- 更重的完整 benchmark 可继续用 `make test-full` 或单独跑 `backend/benchmarks/run_benchmarks.py run-all`
+- deterministic benchmark 默认会让 `lammps_contract` / `lammps_e2e` 使用 mock LAMMPS runtime，避免本机真实 LAMMPS 执行时间污染快速 CI；需要真实 LAMMPS 时使用 `--real-lammps` 或 `make test-lammps-real`
+
+## 测试入口
+
+根目录已提供 Makefile，默认使用 Python 3.12 的 `lammps_agent` Conda 环境，不会安装依赖：
+
+```bash
+# 快速：每次提交/本地改动后
+make test-quick
+
+# 单独扫描可提交文件中的 API key/token/私人路径
+make test-secret-scan
+
+# 单独验证 MaterialsAgentBench frozen split 未被同版本误改
+make test-materials-bench-freeze
+
+# 完整：本地或 CI
+make test-full
+
+# 固化 benchmark gate：threshold / critical / baseline regression 失败会非零退出
+make test-benchmark-gate
+
+# 汇总审计高级 agent 改造证据：roadmap、能力面、deterministic report、MaterialsAgentBench freeze
+make audit-advanced-agent
+
+# 记录当前 deterministic benchmark baseline；默认 BENCHMARK_LIMIT=1 是 smoke baseline
+make record-benchmark-baseline
+
+# LAMMPS 重点回归：nightly / 本地长测，显式开启 --real-lammps
+make test-lammps-real
+
+# 单独验证 DAG / semaphore / replan / global timeout
+make test-orchestration
+
+# 记录 3 个 LAMMPS contract case 的耗时、run_mode 和 artifact baseline
+make record-lammps-baseline
+
+# 真实 embedding/reranker/Judge backend：不依赖前端 API，适合手动 live gate
+make test-live-backends
+
+# 只验证 live backend gate wiring，不触网
+make test-live-backends LIVE_BACKENDS=0
+
+# 真实 API / live benchmark：手动触发，需要先启动后端
+make test-live API_BASE=http://127.0.0.1:8000
+```
+
+`make test-quick` 当前覆盖：
+
+- 后端 deterministic unit/schema/evaluator/statistics 快速单测
+- secret scan：检查可提交文件中的 API key/token/private path
+- `benchmarks/run_benchmarks.py validate`
+- MaterialsAgentBench schema/freeze manifest 临时构建到 `/tmp/materials_agent_bench_quick_ci`
+- MaterialsAgentBench 仓库级 freeze lock 校验
+- `frontend` 的 `npm run build`
+
+`make test-benchmark-gate` 会先运行 deterministic `run-all` smoke，再调用 `scripts/benchmark_gate.py` 检查当前 report 的 threshold、critical failure，以及可选 baseline regression。该默认入口使用 `BENCHMARK_LIMIT=1`，不会调用真实 LAMMPS，也不会使用真实 embedding/reranker/LLM Judge；真实 LAMMPS 长测走 `make test-lammps-real`，真实 embedding/reranker/Judge 后端走 `make test-live-backends`，完整 API live benchmark 走 `make test-live`。真实 Judge 还需要显式设置 `MATERIALS_JUDGE_PROVIDER=openrouter|dashscope`、`MATERIALS_JUDGE_LIVE_ENABLED=true` 和对应 API key。若要和旧报告比较：
+
+```bash
+make test-benchmark-gate BENCHMARK_BASELINE=backend/outputs/benchmarks/baseline.json
+```
+
+若要跑全量 deterministic benchmark gate：
+
+```bash
+make test-benchmark-gate BENCHMARK_LIMIT=
+```
+
+gate 产物默认写入 `/tmp/phase_diagram_agent_benchmark_gate`，包含 `gate.json` 和 `report.md`；失败时命令返回非 0，可直接作为 CI 合并阻断。
+
+`make audit-advanced-agent` 不会重新跑长 benchmark，只读取当前仓库内的 roadmap、核心能力代码面、`backend/outputs/benchmarks/latest.json`、benchmark dataset manifest 与 MaterialsAgentBench freeze lock，输出一份 JSON 审计结果。它会检查 DAG/replan/lifecycle、LAMMPS 质量门、Red-Blue、共享记忆、benchmark suite、测试文件、Makefile gate 和 CI workflow 是否仍然存在并接线，用来快速确认高级 agent 迁移证据是否仍然闭合。
+
+仓库已提供三条 GitHub Actions workflow：
+
+- `.github/workflows/quick-ci.yml`：PR/push/manual，运行 `make test-quick`；
+- `.github/workflows/nightly-benchmark.yml`：定时/manual，运行 `make test-full`，可选真实 LAMMPS gate，并上传 benchmark artifact；
+- `.github/workflows/live-backends.yml`：manual，运行 `make test-live-backends`，可选 API live gate；API key 通过 GitHub Secrets 注入，报告只记录 key 是否存在，不输出 key 值。
+
+`make record-benchmark-baseline` 会把当前 deterministic `run-all` 结果写入：
+
+- `backend/outputs/benchmarks/baseline.json`
+
+默认沿用 `BENCHMARK_LIMIT=1`，因此它是快速 smoke baseline；要记录全量 deterministic baseline，用：
+
+```bash
+make record-benchmark-baseline BENCHMARK_LIMIT=
+```
+
+`make record-lammps-baseline` 会运行 `lammps_contract` 三个 case，并把结构化基线写到：
+
+- `backend/outputs/baselines/lammps_contract/baseline.json`
+- `backend/outputs/baselines/lammps_contract/report.md`
+
+报告会显式记录每个 case 的 `run_mode`。默认 baseline 使用 deterministic mock runtime，只能作为基础设施 baseline；如需记录真实科学执行 baseline，可直接运行 `cd backend && conda run -n lammps_agent python benchmarks/lammps_contract_baseline.py --real-lammps`。
 
 ## 运行入口
 
@@ -453,12 +562,14 @@ LAMMPS 生成保留真实本地执行路径：
 
 1. `README.md`
 2. `docs/ARCHITECTURE.md`
-3. `docs/RAG_PRODUCTION.md`
+3. `docs/ADVANCED_AGENT_MIGRATION_ROADMAP.md`
+4. `docs/RAG_PRODUCTION.md`
 
 其中：
 
 - `README.md` 保留运行方式、项目结构和主线说明
 - `docs/` 保留仍与当前实现对应的专项设计文档
+- `docs/ADVANCED_AGENT_MIGRATION_ROADMAP.md` 是后续高级编排、Red-Blue、物理质量门、分层记忆和评测升级的执行路线图
 
 ## 当前规模
 

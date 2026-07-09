@@ -1,0 +1,74 @@
+name: Nightly Benchmark
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+    inputs:
+      run_real_lammps:
+        description: "Run LAMMPS-focused suites with --real-lammps after the full deterministic gate."
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      benchmark_baseline:
+        description: "Optional path to a checked-out benchmark baseline JSON for regression comparison."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: full and LAMMPS gates
+    runs-on: ${{ vars.PHASE_AGENT_RUNNER || 'self-hosted' }}
+    timeout-minutes: 360
+    env:
+      CONDA: ${{ vars.CONDA || '/opt/anaconda3/bin/conda' }}
+      CONDA_ENV: ${{ vars.CONDA_ENV || 'lammps_agent' }}
+      BENCHMARK_DIR: backend/outputs/benchmarks/nightly
+      BENCHMARK_BASELINE: ${{ inputs.benchmark_baseline || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify pre-provisioned Conda environment
+        run: |
+          test -x "$CONDA"
+          "$CONDA" env list | awk '{print $1}' | grep -x "$CONDA_ENV"
+
+      - name: Prepare output directory
+        run: mkdir -p "$BENCHMARK_DIR"
+
+      - name: Run full deterministic gate
+        run: |
+          make test-full \
+            BENCHMARK_OUTPUT="$BENCHMARK_DIR/full.json" \
+            BENCHMARK_GATE_OUTPUT="$BENCHMARK_DIR/full_gate" \
+            BENCHMARK_BASELINE="$BENCHMARK_BASELINE"
+
+      - name: Run real LAMMPS benchmark gate
+        if: ${{ github.event_name == 'schedule' || inputs.run_real_lammps == 'true' }}
+        run: |
+          make test-lammps-real BENCHMARK_OUTPUT="$BENCHMARK_DIR/lammps_real.json"
+          PYTHONDONTWRITEBYTECODE=1 "$CONDA" run -n "$CONDA_ENV" python scripts/benchmark_gate.py \
+            --report "$BENCHMARK_DIR/lammps_real.json" \
+            --output-dir "$BENCHMARK_DIR/lammps_real_gate" \
+            --label lammps-real
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-benchmark-${{ github.run_id }}
+          path: |
+            backend/outputs/benchmarks/nightly
+          if-no-files-found: warn
+          retention-days: 30

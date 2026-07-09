@@ -152,6 +152,7 @@ export function AgentWorkbench() {
     liveProgress,
     runHistory,
     sendMessage,
+    resumeJob,
     loadRun,
     cancelCurrentRun,
     refreshRunHistory,
@@ -490,6 +491,7 @@ export function AgentWorkbench() {
             onRemoveAsset={handleRemoveAsset}
             onSend={handleSend}
             onAiAnalyze={handleAiAnalyze}
+            onResumeJob={resumeJob}
             onRequestPromptSuggestion={handleRequestPromptSuggestion}
             isSuggestingPrompt={isSuggestingPrompt}
           />

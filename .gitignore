@@ -22,8 +22,12 @@ env/
 # Local environment files
 .env
 **/.env
+.env.*
+**/.env.*
 .env.local
 **/.env.local
+!.env.example
+!**/.env.example
 
 # Node / frontend builds
 node_modules/

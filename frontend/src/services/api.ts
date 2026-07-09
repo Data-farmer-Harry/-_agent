@@ -2,6 +2,8 @@ import type {
   AgentChatRequest,
   AgentJobRecord,
   AgentJobResultResponse,
+  AgentJobResumeRequest,
+  AgentJobResumeResponse,
   AgentRunResponse,
   AgentStreamEvent,
   ClientSettings,
@@ -127,6 +129,21 @@ export async function cancelJobRequest(settings: ClientSettings, jobId: string):
   return requestJson<AgentJobRecord>(
     buildUrl(settings.apiBaseUrl, `/api/jobs/${jobId}/cancel`),
     { method: 'POST' },
+    Math.min(settings.requestTimeoutMs, 15000),
+  )
+}
+
+export async function resumeJobRequest(
+  settings: ClientSettings,
+  jobId: string,
+  payload: AgentJobResumeRequest,
+): Promise<AgentJobResumeResponse> {
+  return requestJson<AgentJobResumeResponse>(
+    buildUrl(settings.apiBaseUrl, `/api/jobs/${jobId}/resume`),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
     Math.min(settings.requestTimeoutMs, 15000),
   )
 }

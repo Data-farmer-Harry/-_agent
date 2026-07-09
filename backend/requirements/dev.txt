@@ -1,0 +1,3 @@
+# Test and local development dependencies.
+pytest==9.0.2
+httpx==0.28.1

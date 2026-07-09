@@ -75,6 +75,8 @@ CONFIG_KEY_MAP = {
     "allow_mock_fallback": "ALLOW_MOCK_FALLBACK",
     "force_mock": "USE_MOCK",
     "max_retries": "MAX_RUN_RETRIES",
+    "lammps_preflight_dag_enabled": "LAMMPS_PREFLIGHT_DAG_ENABLED",
+    "lammps_red_blue_review_enabled": "LAMMPS_RED_BLUE_REVIEW_ENABLED",
 }
 SECRET_CONFIG_KEYS = {
     "llm_api_key",

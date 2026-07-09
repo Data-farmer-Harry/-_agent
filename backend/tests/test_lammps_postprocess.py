@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from unittest.mock import patch
 
+from app.lammps.config import detect_ovito_backend
 from app.lammps.postprocess import generate_diffusion_trajectory_if_applicable, resolve_dump_path
 
 
@@ -38,6 +40,30 @@ class LammpsPostprocessTests(unittest.TestCase):
             resolved = resolve_dump_path(output_dir, "custom_trajectory.lammpstrj")
 
         self.assertEqual(resolved.name, "custom_trajectory.lammpstrj")
+
+    def test_detect_ovito_backend_does_not_treat_desktop_binary_as_script_runner(self) -> None:
+        def fake_which(candidate: str) -> str | None:
+            if candidate == "ovito":
+                return "/opt/test/bin/ovito"
+            return None
+
+        with patch("app.lammps.config.shutil.which", side_effect=fake_which), patch("importlib.util.find_spec", return_value=None):
+            status = detect_ovito_backend()
+
+        self.assertFalse(status["ovito_available"])
+        self.assertEqual(status["ovito_location"], "/opt/test/bin/ovito")
+        self.assertIn("no scripting", str(status["ovito_backend"]))
+
+    def test_detect_ovito_backend_prefers_python_module_when_no_ovitos_runner_exists(self) -> None:
+        module_spec = ModuleSpec("ovito", loader=None, is_package=True)
+        module_spec.submodule_search_locations = ["/tmp/site-packages/ovito"]
+
+        with patch("app.lammps.config.shutil.which", return_value=None), patch("importlib.util.find_spec", return_value=module_spec):
+            status = detect_ovito_backend()
+
+        self.assertTrue(status["ovito_available"])
+        self.assertEqual(status["ovito_backend"], "python module")
+        self.assertEqual(status["ovito_location"], "/tmp/site-packages/ovito")
 
 
 if __name__ == "__main__":

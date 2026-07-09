@@ -1,0 +1,38 @@
+name: Quick CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quick-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    name: quick gate
+    runs-on: ${{ vars.PHASE_AGENT_RUNNER || 'self-hosted' }}
+    timeout-minutes: 60
+    env:
+      CONDA: ${{ vars.CONDA || '/opt/anaconda3/bin/conda' }}
+      CONDA_ENV: ${{ vars.CONDA_ENV || 'lammps_agent' }}
+      BENCHMARK_LIMIT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify pre-provisioned Conda environment
+        run: |
+          test -x "$CONDA"
+          "$CONDA" env list | awk '{print $1}' | grep -x "$CONDA_ENV"
+
+      - name: Run quick project gate
+        run: make test-quick

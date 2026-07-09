@@ -6,7 +6,17 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.chat import ChatAgent
 from app.agents.compute import ComputeAgent
+from app.config import settings
 from app.memory import MemoryStore
+from app.shared_memory import SharedMemoryService
+from app.shared_memory.agent_integration import (
+    build_lammps_execution_fact_items,
+    build_materials_rag_evidence_items,
+    build_run_rag_evidence_items,
+    build_user_constraint_items,
+    conversation_scope,
+    write_results_metadata,
+)
 from app.agents.recognition import RecognitionAgent
 from app.core.agent_protocol import build_agent_envelope, summarize_protocol_messages
 from app.core.llm import LLMRequiredError
@@ -29,6 +39,23 @@ from app.agents.supervisor import SupervisorAgent
 from app.core.artifacts import ArtifactService
 
 
+def retrieval_metadata_like(retrieval: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(retrieval, dict):
+        return {"available": False}
+    if retrieval.get("available") is False:
+        return {"available": False, "error": retrieval.get("error", "")}
+    return {
+        "available": True,
+        "backend": retrieval.get("retrieval_backend", ""),
+        "scope_filter": retrieval.get("scope_filter", []),
+        "selected_item_ids": retrieval.get("selected_item_ids", []),
+        "forced_retention_ids": retrieval.get("forced_retention_ids", []),
+        "dropped_reasons": retrieval.get("dropped_reasons", {}),
+        "estimated_before_bytes": retrieval.get("estimated_before_bytes", 0),
+        "estimated_after_bytes": retrieval.get("estimated_after_bytes", 0),
+    }
+
+
 class AgentAppGraph:
     def __init__(
         self,
@@ -39,9 +66,14 @@ class AgentAppGraph:
         recognition_agent: RecognitionAgent,
         compute_agent: ComputeAgent,
         chat_agent: ChatAgent,
+        shared_memory_service: SharedMemoryService | None = None,
     ) -> None:
         self.artifact_service = artifact_service
         self.memory_store = memory_store
+        memory_root = getattr(getattr(memory_store, "paths", None), "root_dir", None)
+        self.shared_memory = shared_memory_service or SharedMemoryService(
+            root_dir=memory_root or (settings.tmp_dir / settings.memory_dir_name)
+        )
         self.supervisor = supervisor
         self.recognition_agent = recognition_agent
         self.compute_agent = compute_agent
@@ -213,6 +245,10 @@ class AgentAppGraph:
             artifact_names=[artifact.name for artifact in record.artifacts],
         )
 
+    @classmethod
+    def last_run_context_from_record(cls, record: RunRecordSummary) -> LastRunContext:
+        return cls._last_run_context_from_record(record)
+
     def _resolve_last_run_context(
         self,
         *,
@@ -238,6 +274,49 @@ class AgentAppGraph:
             return request_context
         return LastRunContext()
 
+    def _retrieve_shared_memory(self, *, conversation_id: str, query: str, top_k: int = 8) -> tuple[dict[str, Any], str]:
+        try:
+            result = self.shared_memory.retrieve(
+                query=query,
+                scope=conversation_scope(conversation_id, include_global=True),
+                top_k=top_k,
+                prompt_budget_bytes=12_288,
+            )
+            return result.model_dump(mode="json"), ""
+        except Exception as exc:  # noqa: BLE001 - shared memory must never block core agent execution.
+            return {"available": False, "error": str(exc)}, str(exc)
+
+    def _write_shared_memory_items(self, items) -> tuple[list[dict[str, Any]], str]:
+        try:
+            results = [self.shared_memory.write(item) for item in items]
+            return write_results_metadata(results), ""
+        except Exception as exc:  # noqa: BLE001 - degrade to old MemoryStore on shared-memory failures.
+            return [{"error": str(exc)}], str(exc)
+
+    @staticmethod
+    def _shared_memory_response_metadata(
+        *,
+        retrieval: dict[str, Any] | None = None,
+        writes: list[dict[str, Any]] | None = None,
+        stage: str = "",
+        error: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"stage": stage}
+        if retrieval is not None:
+            payload["retrieval"] = retrieval_metadata_like(retrieval)
+        if writes is not None:
+            payload["writes"] = writes
+            valid_writes = [item for item in writes if not item.get("error")]
+            payload["write_count"] = len(valid_writes)
+            payload["conflict_count"] = sum(len(item.get("conflict_ids") or []) for item in valid_writes)
+            payload["needs_user_count"] = len([item for item in valid_writes if item.get("needs_user")])
+            payload["quarantined_count"] = len([item for item in valid_writes if item.get("quarantined")])
+            payload["conflicted_count"] = len([item for item in valid_writes if item.get("conflicted")])
+            payload["unsafe_write_count"] = payload["quarantined_count"] + payload["conflicted_count"]
+        if error:
+            payload["error"] = error
+        return {"shared_memory": payload}
+
     def load_memory_node(self, state: AgentGraphState) -> dict[str, Any]:
         snapshot = self.memory_store.merge_request(state["request"])
         resolved_last_run_context = self._resolve_last_run_context(
@@ -246,6 +325,10 @@ class AgentAppGraph:
             snapshot_context=snapshot.last_run_context,
         )
         messages = [*snapshot.messages, ConversationTurn(role="user", content=state["request"].message)]
+        shared_retrieval, shared_error = self._retrieve_shared_memory(
+            conversation_id=state["conversation_id"],
+            query=state["request"].message,
+        )
         updates = self._record_step(
             state,
             tool_name="load_memory",
@@ -256,6 +339,8 @@ class AgentAppGraph:
                 "message_count": len(snapshot.messages),
                 "has_last_run": bool(resolved_last_run_context.run_id),
                 "long_term_topics": snapshot.long_term.research_topics[:6],
+                "shared_memory_selected": len(shared_retrieval.get("selected_item_ids", [])) if isinstance(shared_retrieval, dict) else 0,
+                "shared_memory_error": shared_error,
             },
             description="Load short-term memory and previous run context before routing.",
             stage="load_memory",
@@ -275,18 +360,44 @@ class AgentAppGraph:
             "recognition_result": snapshot.recognition_result,
             "current_context_summary": snapshot.current_context_summary,
             "long_term_memory_hits": long_term_hits,
+            "shared_memory_context": shared_retrieval,
+            "shared_memory_events": [
+                *state.get("shared_memory_events", []),
+                {"stage": "load_memory", "retrieval": retrieval_metadata_like(shared_retrieval), "error": shared_error},
+            ],
+            "response_metadata": {
+                **state.get("response_metadata", {}),
+                **self._shared_memory_response_metadata(retrieval=shared_retrieval, stage="load_memory", error=shared_error),
+            },
         }
 
     def supervisor_node(self, state: AgentGraphState) -> dict[str, Any]:
         decision = self.supervisor.decide(state)
         route = self.supervisor.build_route(decision)
+        shared_writes, write_error = self._write_shared_memory_items(
+            build_user_constraint_items(
+                request=state["request"],
+                route=route,
+                decision=decision,
+                run_id=state["run_id"],
+            )
+        )
+        shared_retrieval, retrieval_error = self._retrieve_shared_memory(
+            conversation_id=state["conversation_id"],
+            query=state["request"].message,
+        )
         updates = self._record_step(
             state,
             tool_name="SupervisorAgent",
             success=True,
             summary=f"Supervisor 已将本轮请求判定为 {route.name}。",
             input_data={"message": state["request"].message},
-            output_data=decision,
+            output_data={
+                **decision,
+                "shared_memory_write_count": len([item for item in shared_writes if not item.get("error")]),
+                "shared_memory_selected": len(shared_retrieval.get("selected_item_ids", [])) if isinstance(shared_retrieval, dict) else 0,
+                "shared_memory_error": write_error or retrieval_error,
+            },
             description="Route the request between chat, recognition, phase-diagram generation, and mixed flows.",
             stage="supervisor",
         )
@@ -297,6 +408,25 @@ class AgentAppGraph:
             "compute_domain": route.compute_domain,
             "route": route,
             "supervisor_decision": decision,
+            "shared_memory_context": shared_retrieval,
+            "shared_memory_events": [
+                *state.get("shared_memory_events", []),
+                {
+                    "stage": "supervisor",
+                    "writes": shared_writes,
+                    "retrieval": retrieval_metadata_like(shared_retrieval),
+                    "error": write_error or retrieval_error,
+                },
+            ],
+            "response_metadata": {
+                **state.get("response_metadata", {}),
+                **self._shared_memory_response_metadata(
+                    retrieval=shared_retrieval,
+                    writes=shared_writes,
+                    stage="supervisor",
+                    error=write_error or retrieval_error,
+                ),
+            },
         }
 
     def recognition_node(self, state: AgentGraphState) -> dict[str, Any]:
@@ -375,17 +505,74 @@ class AgentAppGraph:
 
     def compute_node(self, state: AgentGraphState) -> dict[str, Any]:
         result = self.compute_agent.run(state, state.get("supervisor_decision", {}))
+        compute_response = result.get("lammps_result") or result.get("phase_diagram_result")
+        shared_writes: list[dict[str, Any]] = []
+        write_error = ""
+        if compute_response is not None and getattr(compute_response, "route", None) is not None:
+            shared_items = build_run_rag_evidence_items(response=compute_response)
+            if compute_response.route.compute_domain == "lammps" or compute_response.route.name == "lammps.generate":
+                shared_items = [*build_lammps_execution_fact_items(response=compute_response), *shared_items]
+            shared_writes, write_error = self._write_shared_memory_items(shared_items)
+        shared_retrieval, retrieval_error = self._retrieve_shared_memory(
+            conversation_id=state["conversation_id"],
+            query=state["request"].message,
+        )
+        result["shared_memory_context"] = shared_retrieval
+        result["shared_memory_events"] = [
+            *state.get("shared_memory_events", []),
+            {
+                "stage": "compute",
+                "writes": shared_writes,
+                "retrieval": retrieval_metadata_like(shared_retrieval),
+                "error": write_error or retrieval_error,
+            },
+        ]
+        result["response_metadata"] = {
+            **state.get("response_metadata", {}),
+            **result.get("response_metadata", {}),
+            **self._shared_memory_response_metadata(
+                retrieval=shared_retrieval,
+                writes=shared_writes,
+                stage="compute",
+                error=write_error or retrieval_error,
+            ),
+        }
         return result
 
     def chat_node(self, state: AgentGraphState) -> dict[str, Any]:
         chat_result = self.chat_agent.run(state)
+        rag_evidence = chat_result.get("rag_evidence") if isinstance(chat_result.get("rag_evidence"), dict) else {}
+        shared_writes: list[dict[str, Any]] = []
+        write_error = ""
+        if rag_evidence and rag_evidence.get("kind") == "materials_rag":
+            shared_writes, write_error = self._write_shared_memory_items(
+                build_materials_rag_evidence_items(
+                    conversation_id=state["conversation_id"],
+                    query=str(rag_evidence.get("query") or state["request"].message),
+                    hits=list(rag_evidence.get("hits") or []),
+                    run_id=state["run_id"],
+                    stage="chat_materials_rag",
+                    domain=rag_evidence.get("domain"),
+                    doc_type=rag_evidence.get("doc_type"),
+                    material=rag_evidence.get("material"),
+                )
+            )
+        shared_retrieval, retrieval_error = self._retrieve_shared_memory(
+            conversation_id=state["conversation_id"],
+            query=state["request"].message,
+        )
         updates = self._record_step(
             state,
             tool_name="ChatAgent",
             success=True,
             summary="ChatAgent 已生成最终回复。",
             input_data={"message": state["request"].message},
-            output_data={"answer_preview": chat_result["final_answer"][:300]},
+            output_data={
+                "answer_preview": chat_result["final_answer"][:300],
+                "shared_memory_write_count": len([item for item in shared_writes if not item.get("error")]),
+                "shared_memory_selected": len(shared_retrieval.get("selected_item_ids", [])) if isinstance(shared_retrieval, dict) else 0,
+                "shared_memory_error": write_error or retrieval_error,
+            },
             description="Generate the final dialog response using current results and prior context.",
             stage="chat",
         )
@@ -398,9 +585,25 @@ class AgentAppGraph:
             "artifact_messages": chat_result.get("artifact_messages") or state.get("artifact_messages", []),
             "html_content": chat_result.get("html_content") or state.get("html_content", ""),
             "html_path": chat_result.get("html_path") or state.get("html_path", ""),
+            "shared_memory_context": shared_retrieval,
+            "shared_memory_events": [
+                *state.get("shared_memory_events", []),
+                {
+                    "stage": "chat",
+                    "writes": shared_writes,
+                    "retrieval": retrieval_metadata_like(shared_retrieval),
+                    "error": write_error or retrieval_error,
+                },
+            ],
             "response_metadata": {
                 **state.get("response_metadata", {}),
                 **chat_result.get("response_metadata", {}),
+                **self._shared_memory_response_metadata(
+                    retrieval=shared_retrieval,
+                    writes=shared_writes,
+                    stage="chat",
+                    error=write_error or retrieval_error,
+                ),
             },
             "response_summary": {
                 **state.get("response_summary", {}),
@@ -408,7 +611,9 @@ class AgentAppGraph:
             },
             "termination_reason": (
                 chat_result.get("termination_reason")
-                if chat_result.get("artifact_messages") or chat_result.get("html_content") or chat_result.get("termination_reason") != "conversation_answered"
+                if chat_result.get("artifact_messages")
+                or chat_result.get("html_content")
+                or chat_result.get("termination_reason") != "conversation_answered"
                 else state.get("termination_reason", "conversation_answered")
             ),
         }
@@ -530,11 +735,13 @@ class AgentAppGraph:
         if compute_response is not None:
             metadata = {
                 **compute_response.metadata,
+                **state.get("response_metadata", {}),
                 "request_id": state.get("request_id", ""),
                 "current_context_summary": state.get("current_context_summary", ""),
                 "runtime_final_message": compute_response.final_message,
                 "chat_final_message": state.get("final_answer", ""),
                 "agent_protocol": protocol_summary,
+                "shared_memory_events": state.get("shared_memory_events", [])[-8:],
             }
             summary = {"request_message": request_message, "request_id": state.get("request_id", ""), **compute_response.summary}
             return AgentRunResponse(
@@ -579,6 +786,7 @@ class AgentAppGraph:
                 "request_id": state.get("request_id", ""),
                 "current_context_summary": state.get("current_context_summary", ""),
                 "agent_protocol": protocol_summary,
+                "shared_memory_events": state.get("shared_memory_events", [])[-8:],
             },
             recognition_result=state.get("recognition_result"),
             current_context_summary=state.get("current_context_summary", ""),
@@ -618,6 +826,8 @@ class AgentAppGraph:
             "trace": [],
             "event_sink": event_sink,
             "memory_snapshot": MemorySnapshot(conversation_id=request.conversation_id),
+            "shared_memory_context": {},
+            "shared_memory_events": [],
             "protocol_messages": [],
         }
         self._emit(
@@ -667,6 +877,7 @@ class AgentAppGraph:
                     "current_context_summary": final_state.get("current_context_summary", ""),
                     "error_type": exc.__class__.__name__,
                     "request_id": request_id,
+                    "shared_memory_events": final_state.get("shared_memory_events", [])[-8:],
                 },
                 recognition_result=final_state.get("recognition_result"),
                 current_context_summary=final_state.get("current_context_summary", ""),

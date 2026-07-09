@@ -53,7 +53,7 @@ It was frozen before its first complete evaluation and must not be used to tune 
 
 ```bash
 cd backend
-./.venv/bin/python benchmarks/run_rag_blind_eval.py \
+conda run -n lammps_agent python benchmarks/run_rag_blind_eval.py \
   --workers 3 \
   --require-remote \
   --require-reranker

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Send, Sparkles, Database, FlaskConical, Activity, ClipboardList, Download, Terminal, ShieldCheck, Paperclip, ImagePlus, X } from 'lucide-react';
 import { ArtifactResultPanel } from '../result/ArtifactResultPanel';
-import type { ClientSettings, RecognitionResult, UploadedAsset } from '../../types/api';
+import type { AgentJobResumeRequest, ClientSettings, RecognitionResult, UploadedAsset } from '../../types/api';
 import type { ConversationMessage, LiveProgressSnapshot } from './useAgentChat';
 
 interface AgentConversationPanelProps {
@@ -20,6 +20,7 @@ interface AgentConversationPanelProps {
   onRemoveAsset: (assetId: string) => void;
   onSend: (manualPrompt?: string) => void;
   onAiAnalyze: (prompt: string) => void;
+  onResumeJob: (jobId: string, payload: AgentJobResumeRequest) => Promise<void>;
   onRequestPromptSuggestion: () => void | Promise<void>;
   isSuggestingPrompt: boolean;
 }
@@ -246,6 +247,7 @@ export function AgentConversationPanel({
   onRemoveAsset,
   onSend,
   onAiAnalyze,
+  onResumeJob,
   onRequestPromptSuggestion,
   isSuggestingPrompt,
 }: AgentConversationPanelProps) {
@@ -417,8 +419,10 @@ export function AgentConversationPanel({
                              htmlContent={msg.htmlContent}
                              artifacts={msg.artifacts || []}
                              summary={msg.summary || {}}
+                             metadata={msg.metadata || {}}
                              isLoading={msg.runStatus === 'running' || msg.runStatus === 'queued'}
                              onAiAnalyze={onAiAnalyze}
+                             onResumeJob={onResumeJob}
                           />
                         </div>
                       )}

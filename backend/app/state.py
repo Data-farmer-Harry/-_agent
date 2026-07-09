@@ -19,6 +19,9 @@ AgentStreamEventType = Literal[
     "step_started",
     "step_completed",
     "step_failed",
+    "lifecycle_event",
+    "dag_event",
+    "checkpoint_saved",
     "run_completed",
     "run_error",
 ]
@@ -383,6 +386,11 @@ class AgentJobRecord(BaseModel):
     result_run_id: str = ""
     error: str = ""
     event_count: int = 0
+    attempt: int = 1
+    source_job_id: str = ""
+    source_run_id: str = ""
+    source_checkpoint_id: str = ""
+    resume_mode: str = ""
 
 
 class AgentJobListResponse(BaseModel):
@@ -394,6 +402,22 @@ class AgentJobEventRecord(BaseModel):
     event_id: int
     job_id: str
     event: AgentStreamEvent
+
+
+class AgentJobResumeRequest(BaseModel):
+    message: str = Field(default="", max_length=4000)
+    checkpoint_id: str = Field(default="", max_length=160)
+    strategy: str = Field(default="checkpoint_context", max_length=80)
+
+
+class AgentJobResumeResponse(BaseModel):
+    source_job: AgentJobRecord
+    resumed_job: AgentJobRecord
+    source_run_id: str = ""
+    source_run_available: bool = False
+    checkpoint_id: str = ""
+    resume_mode: str = "new_attempt_with_checkpoint_context"
+    message: str = ""
 
 
 class ShortTermMemorySnapshot(BaseModel):
@@ -525,4 +549,6 @@ class AgentGraphState(TypedDict, total=False):
     request_id: str
     memory_snapshot: MemorySnapshot
     long_term_memory_hits: list[str]
+    shared_memory_context: dict[str, Any]
+    shared_memory_events: list[dict[str, Any]]
     protocol_messages: list[AgentEnvelope]

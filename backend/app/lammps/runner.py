@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import csv
+import json
 import shutil
 import subprocess
 import time
@@ -9,6 +9,7 @@ from typing import Any
 
 from app.core.cancellation import RunCancelledError, is_cancelled
 from app.lammps.config import LammpsConfig
+from app.lammps.quality import parse_real_thermo_to_csv, seed_thermo_rows, summarize_thermo_rows, write_thermo_csv
 from app.lammps.template import EAM_FILES
 
 
@@ -28,7 +29,7 @@ def run_lammps(
     request: dict[str, object],
     config: LammpsConfig,
     run_id: str | None = None,
-) -> tuple[str, str, dict[str, float]]:
+) -> tuple[str, str, dict[str, Any]]:
     command = detect_lammps_command(config)
     if not command:
         raise RuntimeError("LAMMPS executable not found.")
@@ -81,76 +82,25 @@ def run_lammps(
     if proc.returncode != 0:
         raise RuntimeError(f"LAMMPS execution failed with exit code {proc.returncode}.")
 
-    summary = extract_or_seed_thermo(stdout, request, thermo_path)
+    summary = parse_real_thermo_to_csv(stdout, thermo_path)
     return "real", "", summary
 
 
-def extract_or_seed_thermo(stdout: str, request: dict[str, object], thermo_path: Path) -> dict[str, float]:
-    rows: list[dict[str, float]] = []
-    for line in stdout.splitlines():
-        parts = line.strip().split()
-        if len(parts) != 6 or not parts[0].isdigit():
-            continue
-        try:
-            rows.append(
-                {
-                    "step": float(parts[0]),
-                    "temp": float(parts[1]),
-                    "pe": float(parts[2]),
-                    "ke": float(parts[3]),
-                    "etotal": float(parts[4]),
-                    "press": float(parts[5]),
-                }
-            )
-        except ValueError:
-            continue
-
-    if not rows:
-        rows = seed_thermo_rows(int(request["temperature"]), int(request["steps"]))
-
-    with thermo_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["step", "temp", "pe", "ke", "etotal", "press"])
-        writer.writeheader()
-        writer.writerows(rows)
-
-    last = rows[-1]
-    return {
-        "final_temp": round(last["temp"], 3),
-        "final_pe": round(last["pe"], 3),
-        "final_etotal": round(last["etotal"], 3),
-        "max_press": round(max(row["press"] for row in rows), 3),
-    }
-
-
-def seed_thermo_rows(temperature: int, steps: int) -> list[dict[str, float]]:
-    interval = max(steps // 10, 100)
-    rows = []
-    for idx, step in enumerate(range(0, steps + interval, interval)):
-        temp = min(temperature, 300 + idx * (temperature - 300) / 10)
-        pe = -3.36 + idx * 0.01
-        ke = 0.025 * temp
-        etotal = pe + ke
-        press = 100 + idx * 4
-        rows.append(
-            {
-                "step": float(step),
-                "temp": float(temp),
-                "pe": float(pe),
-                "ke": float(ke),
-                "etotal": float(etotal),
-                "press": float(press),
-            }
-        )
-    return rows
-
-
-def run_mock(output_dir: Path, request: dict[str, Any], error: str) -> dict[str, float]:
+def run_mock(output_dir: Path, request: dict[str, Any], error: str) -> dict[str, Any]:
     thermo_path = output_dir / "thermo.csv"
     rows = seed_thermo_rows(int(request["temperature"]), int(request["steps"]))
-    with thermo_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["step", "temp", "pe", "ke", "etotal", "press"])
-        writer.writeheader()
-        writer.writerows(rows)
+    write_thermo_csv(rows, thermo_path)
+    (output_dir / "thermo_metadata.json").write_text(
+        json.dumps(
+            {
+                "synthetic_thermo": True,
+                "source": "mock_seed",
+                "reason": error,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     dump_name = str(request.get("dump_file") or "dump.atom")
     dump_path = output_dir / dump_name
@@ -159,10 +109,4 @@ def run_mock(output_dir: Path, request: dict[str, Any], error: str) -> dict[str,
         encoding="utf-8",
     )
     (output_dir / "run.log").write_text(f"Mock fallback enabled.\nOriginal error: {error}\n", encoding="utf-8")
-    last = rows[-1]
-    return {
-        "final_temp": round(last["temp"], 3),
-        "final_pe": round(last["pe"], 3),
-        "final_etotal": round(last["etotal"], 3),
-        "max_press": round(max(row["press"] for row in rows), 3),
-    }
+    return summarize_thermo_rows(rows, synthetic=True)

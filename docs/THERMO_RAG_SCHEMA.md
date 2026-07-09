@@ -160,7 +160,7 @@ RAG 负责：
 
 示例文件：
 
-- [thermo_rag_documents.example.jsonl](/Users/harry/Desktop/相图计算/phase_diagram_agent/backend/configs/thermo_rag_documents.example.jsonl)
+- [thermo_rag_documents.example.jsonl](../backend/configs/thermo_rag_documents.example.jsonl)
 
 ## 推荐的索引顺序
 

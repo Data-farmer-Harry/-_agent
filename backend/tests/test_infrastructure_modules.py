@@ -277,13 +277,22 @@ class InfrastructureModuleTests(unittest.TestCase):
             try:
                 with patch("app.config.DEFAULT_JSON_FILE", config_path):
                     update_runtime_llm_config({"llm_model": "persisted-model", "llm_supports_vision": False})
-                    update_runtime_lammps_config({"lammps_command": "/tmp/unit-lmp", "max_retries": 3})
+                    update_runtime_lammps_config(
+                        {
+                            "lammps_command": "/tmp/unit-lmp",
+                            "max_retries": 3,
+                            "lammps_preflight_dag_enabled": True,
+                            "lammps_red_blue_review_enabled": False,
+                        }
+                    )
                     persisted = read_runtime_config_file(config_path)
 
                 self.assertEqual(persisted["llm_model"], "persisted-model")
                 self.assertFalse(persisted["llm_supports_vision"])
                 self.assertEqual(persisted["lammps_command"], "/tmp/unit-lmp")
                 self.assertEqual(persisted["max_retries"], 3)
+                self.assertTrue(persisted["lammps_preflight_dag_enabled"])
+                self.assertFalse(persisted["lammps_red_blue_review_enabled"])
             finally:
                 settings.llm_model = original_model
                 settings.llm_supports_vision = original_supports_vision
@@ -296,6 +305,8 @@ class InfrastructureModuleTests(unittest.TestCase):
                             "allow_mock_fallback": original_lammps.allow_mock_fallback,
                             "force_mock": original_lammps.force_mock,
                             "max_retries": original_lammps.max_retries,
+                            "lammps_preflight_dag_enabled": original_lammps.lammps_preflight_dag_enabled,
+                            "lammps_red_blue_review_enabled": original_lammps.lammps_red_blue_review_enabled,
                         }
                     )
 

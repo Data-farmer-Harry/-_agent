@@ -1,0 +1,4 @@
+# Full project environment: core runtime + OVITO visualization + tests.
+-r base.txt
+-r visualization.txt
+-r dev.txt

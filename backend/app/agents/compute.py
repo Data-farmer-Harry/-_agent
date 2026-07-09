@@ -94,6 +94,7 @@ class ComputeAgent:
                 existing_plan_steps=state.get("plan_steps", []),
                 existing_trace=state.get("trace", []),
                 existing_artifacts=state.get("artifact_messages", []),
+                shared_memory_context=state.get("shared_memory_context", {}),
             )
             response.conversation_id = state["conversation_id"]
             last_run_context = self._build_phase_context(state, response)

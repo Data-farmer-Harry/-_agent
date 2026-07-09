@@ -1,0 +1,123 @@
+name: Live Backends
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Judge provider used when MATERIALS_JUDGE_LIVE_ENABLED=true."
+        required: true
+        default: "openrouter"
+        type: choice
+        options:
+          - openrouter
+          - dashscope
+          - offline_contract
+      judge_live_enabled:
+        description: "Allow the Judge provider call. Requires matching repository secret."
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      benchmark_limit:
+        description: "Optional benchmark limit. Leave blank for all selected live-backend cases."
+        required: false
+        default: ""
+      run_api_live:
+        description: "Also run API-dependent live suites against API_BASE."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      api_base:
+        description: "API base URL used only when run_api_live=true."
+        required: false
+        default: "http://127.0.0.1:8000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-backends-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  live-backends:
+    name: embedding reranker judge gate
+    runs-on: ${{ vars.PHASE_AGENT_RUNNER || 'self-hosted' }}
+    timeout-minutes: 120
+    env:
+      CONDA: ${{ vars.CONDA || '/opt/anaconda3/bin/conda' }}
+      CONDA_ENV: ${{ vars.CONDA_ENV || 'lammps_agent' }}
+      API_BASE: ${{ inputs.api_base }}
+      BENCHMARK_DIR: backend/outputs/benchmarks/live
+      BENCHMARK_LIMIT: ${{ inputs.benchmark_limit }}
+      MATERIALS_JUDGE_PROVIDER: ${{ inputs.provider }}
+      MATERIALS_JUDGE_LIVE_ENABLED: ${{ inputs.judge_live_enabled }}
+      MATERIALS_JUDGE_TIMEOUT_SECONDS: "20"
+      PHASE_DIAGRAM_LLM_REQUEST_TIMEOUT_SECONDS: "20"
+      PHASE_DIAGRAM_RAG_RERANKER_TIMEOUT_SECONDS: "20"
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_JUDGE_MODEL: ${{ vars.OPENROUTER_JUDGE_MODEL || 'openai/gpt-4o-mini' }}
+      OPENROUTER_API_BASE_URL: ${{ vars.OPENROUTER_API_BASE_URL || 'https://openrouter.ai/api/v1' }}
+      DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      DASHSCOPE_JUDGE_MODEL: ${{ vars.DASHSCOPE_JUDGE_MODEL || 'qwen-plus' }}
+      DASHSCOPE_API_BASE_URL: ${{ vars.DASHSCOPE_API_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify pre-provisioned Conda environment
+        run: |
+          test -x "$CONDA"
+          "$CONDA" env list | awk '{print $1}' | grep -x "$CONDA_ENV"
+
+      - name: Verify requested provider secret
+        if: ${{ inputs.judge_live_enabled == 'true' && inputs.provider != 'offline_contract' }}
+        run: |
+          case "$MATERIALS_JUDGE_PROVIDER" in
+            openrouter)
+              test -n "$OPENROUTER_API_KEY"
+              ;;
+            dashscope)
+              test -n "$DASHSCOPE_API_KEY"
+              ;;
+            *)
+              echo "Unsupported live provider: $MATERIALS_JUDGE_PROVIDER" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Prepare output directory
+        run: mkdir -p "$BENCHMARK_DIR"
+
+      - name: Run live backend benchmark gate
+        run: |
+          make test-live-backends \
+            BENCHMARK_OUTPUT="$BENCHMARK_DIR/live_backends.json" \
+            BENCHMARK_GATE_OUTPUT="$BENCHMARK_DIR/live_backends_gate" \
+            BENCHMARK_LIMIT="$BENCHMARK_LIMIT"
+
+      - name: Run API-dependent live benchmark gate
+        if: ${{ inputs.run_api_live == 'true' }}
+        run: |
+          make test-live \
+            API_BASE="$API_BASE" \
+            BENCHMARK_OUTPUT="$BENCHMARK_DIR/api_live.json"
+          PYTHONDONTWRITEBYTECODE=1 "$CONDA" run -n "$CONDA_ENV" python scripts/benchmark_gate.py \
+            --report "$BENCHMARK_DIR/api_live.json" \
+            --output-dir "$BENCHMARK_DIR/api_live_gate" \
+            --label api-live
+
+      - name: Upload live benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-backends-${{ github.run_id }}
+          path: |
+            backend/outputs/benchmarks/live
+          if-no-files-found: warn
+          retention-days: 14
