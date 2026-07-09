@@ -791,6 +791,9 @@ class ChatAgent:
 
     def _build_fallback_answer(self, state: AgentGraphState, contextual_answer: str | None) -> str:
         request = state["request"]
+        tool_answer = self._build_tool_result_answer(state)
+        if tool_answer:
+            return tool_answer
         if contextual_answer is not None:
             return contextual_answer
         if self.EUTECTOID_PATTERN.search(request.message):
@@ -798,6 +801,114 @@ class ChatAgent:
         if self.PERITECTIC_PATTERN.search(request.message):
             return "包晶反应通常指液相与一种固相在固定温度反应，生成另一种固相；它和共析最大的区别是包晶涉及液相，而共析发生在固态。"
         return "当前处于对话模式。你可以继续问材料概念、追问上一轮相图，或者上传截图让我先做识别。"
+
+    @staticmethod
+    def _format_tool_results(state: AgentGraphState) -> str:
+        tool_results = state.get("tool_results", [])
+        if not tool_results:
+            return "(none)"
+        compacted: list[dict[str, object]] = []
+        for result in tool_results[-6:]:
+            if not isinstance(result, dict):
+                continue
+            output = result.get("output") if isinstance(result.get("output"), dict) else {}
+            output_text = json.dumps(output, ensure_ascii=False, default=str)
+            if len(output_text) > 5000:
+                output_text = output_text[:5000] + "..."
+            compacted.append(
+                {
+                    "tool_name": result.get("tool_name"),
+                    "success": result.get("success"),
+                    "summary": result.get("summary"),
+                    "output": output_text,
+                    "artifacts": result.get("artifacts", []),
+                    "error": result.get("error", ""),
+                }
+            )
+        return json.dumps(compacted, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _build_tool_result_answer(state: AgentGraphState) -> str:
+        tool_results = [result for result in state.get("tool_results", []) if isinstance(result, dict)]
+        if not tool_results:
+            return ""
+        snippets: list[str] = []
+        for result in tool_results:
+            tool_name = str(result.get("tool_name") or "")
+            success = bool(result.get("success"))
+            output = result.get("output") if isinstance(result.get("output"), dict) else {}
+            if not success:
+                snippets.append(f"{tool_name} 执行失败：{result.get('error') or result.get('summary')}")
+                continue
+            if tool_name == "file.read":
+                metadata = output.get("metadata", {}) if isinstance(output.get("metadata"), dict) else {}
+                source = metadata.get("name") or metadata.get("path") or "上传文件"
+                preview = str(output.get("preview") or "")
+                if len(preview) > 1200:
+                    preview = preview[:1200].rstrip() + "…"
+                snippets.append(
+                    f"已读取 {source}，共 {output.get('line_count', '?')} 行、{output.get('char_count', '?')} 字符。"
+                    f"\n\n内容预览：\n{preview}"
+                )
+            elif tool_name == "workspace.search":
+                matches = output.get("matches", []) if isinstance(output.get("matches"), list) else []
+                lines = []
+                for index, item in enumerate(matches[:8], start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    snippet = ""
+                    snippets_payload = item.get("snippets", []) if isinstance(item.get("snippets"), list) else []
+                    if snippets_payload and isinstance(snippets_payload[0], dict):
+                        snippet = f" line {snippets_payload[0].get('line')}: {snippets_payload[0].get('text')}"
+                    lines.append(f"{index}. {item.get('relative_path') or item.get('path')}{snippet}")
+                snippets.append(
+                    f"工作区搜索完成：query={output.get('query')!r}，匹配 {output.get('match_count', 0)} 个。"
+                    + ("\n" + "\n".join(lines) if lines else "")
+                )
+            elif tool_name == "data.profile":
+                profile = output.get("profile", {}) if isinstance(output.get("profile"), dict) else {}
+                numeric = profile.get("numeric_columns", {}) if isinstance(profile.get("numeric_columns"), dict) else {}
+                preview_cols = list(numeric.keys())[:8]
+                snippets.append(
+                    f"数据概况完成：type={profile.get('type')}，行数={profile.get('row_count', 'unknown')}，"
+                    f"数值列={len(numeric)}。主要数值列：{preview_cols}。"
+                )
+            elif tool_name == "structure.convert":
+                artifact = output.get("artifact", {}) if isinstance(output.get("artifact"), dict) else {}
+                snippets.append(
+                    f"结构转换完成：{output.get('source_format')} → {output.get('target_format')}，"
+                    f"原子数 {output.get('atom_count')}，元素 {output.get('elements', [])}。"
+                    f" 输出文件：{artifact.get('name') or 'converted_structure'}。"
+                )
+            elif tool_name == "physics.check":
+                warnings = output.get("warnings", []) if isinstance(output.get("warnings"), list) else []
+                recommendations = output.get("recommendations", []) if isinstance(output.get("recommendations"), list) else []
+                conversions = output.get("conversions", {}) if isinstance(output.get("conversions"), dict) else {}
+                snippets.append(
+                    "物理/单位校验结果："
+                    f"\n换算：{json.dumps(conversions, ensure_ascii=False)}"
+                    f"\n风险：{'; '.join(str(item) for item in warnings) if warnings else '未发现明显红旗'}"
+                    f"\n建议：{'; '.join(str(item) for item in recommendations)}"
+                )
+            elif tool_name == "report.generate":
+                artifact = output.get("artifact", {}) if isinstance(output.get("artifact"), dict) else {}
+                snippets.append(f"报告已生成：{artifact.get('name')}，路径：{artifact.get('path') or artifact.get('url')}")
+            elif tool_name == "literature.search":
+                results = output.get("results", []) if isinstance(output.get("results"), list) else []
+                lines = []
+                for index, item in enumerate(results[:5], start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    lines.append(
+                        f"{index}. {item.get('title') or '(untitled)'}"
+                        f" ({item.get('year') or 'n.d.'})"
+                        f" — {item.get('authors') or 'unknown authors'}"
+                        f" DOI: {item.get('doi') or 'N/A'}"
+                    )
+                snippets.append("文献候选：\n" + ("\n".join(lines) if lines else "未检索到候选。"))
+            else:
+                snippets.append(str(result.get("summary") or f"{tool_name} 已执行。"))
+        return "\n\n".join(snippets)
 
     @staticmethod
     def _format_shared_memory_context(state: AgentGraphState) -> str:
@@ -825,6 +936,15 @@ class ChatAgent:
             ],
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _format_skill_context(state: AgentGraphState) -> str:
+        context = str(state.get("skill_context") or "").strip()
+        if not context:
+            return "(none)"
+        if len(context) > 6000:
+            return context[:5999] + "…"
+        return context
 
     def run(self, state: AgentGraphState) -> dict:
         request = state["request"]
@@ -877,6 +997,8 @@ class ChatAgent:
                         f"Current summary:\n{state.get('current_context_summary', '')}\n\n"
                         f"Retrieved long-term memory:\n{json.dumps(state.get('long_term_memory_hits', []), ensure_ascii=False)}\n\n"
                         f"Shared memory context:\n{self._format_shared_memory_context(state)}\n\n"
+                        f"Selected skill guidance:\n{self._format_skill_context(state)}\n\n"
+                        f"Tool results from this turn:\n{self._format_tool_results(state)}\n\n"
                         f"Last run context:\n{state.get('last_run_context').model_dump_json() if state.get('last_run_context') else '{}'}\n\n"
                         f"Recognition result:\n{state.get('recognition_result').model_dump_json() if state.get('recognition_result') else '{}'}\n\n"
                         f"Materials RAG context:\n{materials_rag_context or '(none)'}\n\n"

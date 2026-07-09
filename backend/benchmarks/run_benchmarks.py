@@ -57,7 +57,14 @@ from app.orchestration import (
 from app.runtimes.lammps import LammpsRuntime
 from app.shared_memory import MemoryItem, MemoryScope, SharedMemoryService
 from app.state import AgentChatRequest, AgentGraphState, AgentRunResponse, AgentStreamEvent, ArtifactRef, ConversationTurn, LammpsRequest, LastRunContext, RecognitionResult, TaskRoute, UploadedAsset
-from benchmarks.build_datasets import DATASET_DIR, build_all_datasets, build_manifest
+from benchmarks.benchmark_config import (
+    BENCHMARK_THRESHOLDS,
+    DEFAULT_BENCHMARK_OUTPUT,
+    DETERMINISTIC_SUITES,
+    LIVE_SUITES,
+)
+from benchmarks.build_datasets import build_manifest
+from benchmarks.dataset_io import load_datasets, resolve_backend_path as _resolve_backend_path, validate_datasets
 from benchmarks.evaluators import (
     build_judge_backend_matrix,
     build_judge_drift_report,
@@ -70,194 +77,6 @@ from benchmarks.evaluators import (
 from benchmarks.materials_agent_bench import build_materials_agent_cases
 from benchmarks.run_rag_recall import run_rag_recall
 from tests.support import MINI_PNG_DATA_URL, ScriptedLLMClient, build_request
-
-
-DEFAULT_BENCHMARK_OUTPUT = BACKEND_ROOT / "outputs" / "benchmarks" / "latest.json"
-DETERMINISTIC_SUITES = (
-    "routing",
-    "rag_recall",
-    "phase_execution",
-    "lammps_contract",
-    "lammps_e2e",
-    "lammps_quality",
-    "lammps_red_blue",
-    "review_json_fallback",
-    "orchestration",
-    "judge_calibration",
-    "lammps_recovery",
-    "recognition",
-    "memory",
-    "memory_retrieval",
-    "shared_memory",
-    "memory_conflict",
-    "context_compression",
-    "materials_multihop",
-    "mcp",
-)
-LIVE_SUITES = ("external_recognition_live",)
-BENCHMARK_THRESHOLDS = {
-    "routing.route_accuracy": 0.90,
-    "routing.compute_domain_accuracy": 0.90,
-    "rag_recall.materials_hit@5": 0.80,
-    "rag_recall.thermo_hit@5": 0.80,
-    "phase_execution.success_rate": 0.80,
-    "phase_execution.accuracy_gate_pass_rate": 0.80,
-    "lammps_contract.artifact_completeness": 0.80,
-    "lammps_e2e.chain_completion_rate": 0.80,
-    "lammps_e2e.clarification_accuracy": 0.80,
-    "lammps_e2e.rag_preflight_rate": 0.80,
-    "lammps_quality.fatal_anomaly_recall": 1.00,
-    "lammps_quality.valid_run_pass_rate": 0.95,
-    "lammps_quality.real_synthetic_guard_rate": 1.00,
-    "lammps_red_blue.fatal_finding_recall": 1.00,
-    "lammps_red_blue.valid_run_non_block_rate": 0.95,
-    "lammps_red_blue.locked_field_protection_rate": 1.00,
-    "lammps_red_blue.patch_verification_rate": 1.00,
-    "lammps_red_blue.evidence_traceability_rate": 1.00,
-    "lammps_red_blue.rag_evidence_traceability_rate": 1.00,
-    "lammps_red_blue.request_script_consistency_block_rate": 1.00,
-    "lammps_red_blue.bounded_loop_rate": 1.00,
-    "review_json_fallback.protocol_recovery_rate": 0.95,
-    "review_json_fallback.invalid_patch_rejection_rate": 1.00,
-    "orchestration.dependency_correctness_rate": 1.00,
-    "orchestration.no_concurrency_violation_rate": 1.00,
-    "orchestration.injected_delay_speedup": 0.25,
-    "orchestration.degradation_decision_accuracy": 1.00,
-    "orchestration.partial_report_safety_rate": 1.00,
-    "judge_calibration.within_one_agreement_rate": 0.80,
-    "judge_calibration.parse_recovery_rate": 1.00,
-    "judge_calibration.hard_gate_non_override_rate": 1.00,
-    "judge_calibration.blind_input_safety_rate": 1.00,
-    "judge_calibration.drift_free_rate": 1.00,
-    "judge_calibration.quick_ci_backend_available_rate": 1.00,
-    "judge_calibration.backend_matrix_secret_safety_rate": 1.00,
-    "lammps_recovery.checkpoint_resume_correctness": 1.00,
-    "recognition.success_rate": 0.80,
-    "memory.followup_grounding_rate": 0.80,
-    "memory_retrieval.memory_retrieval_relevance": 0.80,
-    "shared_memory.duplicate_recall": 1.00,
-    "shared_memory.scope_isolation_rate": 1.00,
-    "shared_memory.locked_retention_rate": 1.00,
-    "shared_memory.evidence_traceability_rate": 1.00,
-    "memory_conflict.conflict_recall": 1.00,
-    "memory_conflict.needs_user_rate": 1.00,
-    "memory_conflict.quarantine_rate": 1.00,
-    "memory_conflict.semantic_candidate_rate": 1.00,
-    "memory_conflict.no_incorrect_auto_resolution_rate": 1.00,
-    "context_compression.l2_traceability_rate": 1.00,
-    "context_compression.noncompressible_protection_rate": 1.00,
-    "materials_multihop.required_hop_completion": 1.00,
-    "materials_multihop.evidence_chain_completeness": 1.00,
-    "materials_multihop.no_unsupported_bridge_claim_rate": 1.00,
-    "materials_multihop.final_conclusion_correctness": 1.00,
-    "materials_multihop.citation_order_authority_rate": 1.00,
-    "materials_multihop.missing_hop_honesty_rate": 1.00,
-    "mcp.tool_contract_pass_rate": 0.90,
-}
-
-
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
-
-
-def load_datasets() -> dict[str, list[dict[str, Any]]]:
-    if not DATASET_DIR.exists():
-        raise FileNotFoundError(f"benchmark dataset directory does not exist: {DATASET_DIR}")
-    datasets: dict[str, list[dict[str, Any]]] = {}
-    for path in sorted(DATASET_DIR.glob("*.jsonl")):
-        datasets[path.stem] = _load_jsonl(path)
-    return datasets
-
-
-def validate_datasets(datasets: dict[str, list[dict[str, Any]]]) -> list[str]:
-    errors: list[str] = []
-    required_common = {"case_id", "suite", "mode", "tags"}
-    for dataset_name, rows in datasets.items():
-        if not rows:
-            errors.append(f"{dataset_name}: dataset is empty")
-            continue
-        for index, row in enumerate(rows, start=1):
-            dataset_required_common = {"case_id", "suite"} if dataset_name == "rag_blind_cases" else required_common
-            missing = sorted(dataset_required_common - set(row.keys()))
-            if missing:
-                errors.append(f"{dataset_name}:{index}: missing common fields {missing}")
-            if dataset_name == "rag_blind_cases":
-                for field in ("query", "material", "domain", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name in {"routing_cases", "phase_parsing_cases", "lammps_parsing_cases", "phase_execution_cases", "lammps_contract_cases", "lammps_e2e_cases", "recognition_cases"}:
-                for field in ("prompt", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "lammps_quality_cases":
-                for field in ("fixture", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "lammps_red_blue_cases":
-                for field in ("scenario", "fixture", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "review_json_fallback_cases":
-                for field in ("payload_type", "schema", "raw", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "orchestration_cases":
-                for field in ("scenario", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "judge_calibration_cases":
-                for field in ("observation", "human_scores", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "lammps_recovery_cases":
-                for field in ("scenario", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "external_recognition_cases":
-                for field in ("prompt", "expected", "asset_path", "source_url"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-                else:
-                    asset_path = _resolve_backend_path(row["asset_path"])
-                    if not asset_path.exists():
-                        errors.append(f"{dataset_name}:{index}: asset_path does not exist: {asset_path}")
-            if dataset_name == "memory_followup_cases" and "turns" not in row:
-                errors.append(f"{dataset_name}:{index}: missing turns")
-            if dataset_name == "memory_retrieval_cases":
-                for field in ("seed_messages", "query", "expected_hits"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "shared_memory_cases":
-                for field in ("scenario", "items", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "memory_conflict_cases":
-                for field in ("scenario", "items", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "context_compression_cases":
-                for field in ("scenario", "items", "query", "expected"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "materials_multihop_cases":
-                for field in ("prompt", "expected", "observation"):
-                    if field not in row:
-                        errors.append(f"{dataset_name}:{index}: missing {field}")
-            if dataset_name == "mcp_cases" and "request" not in row:
-                errors.append(f"{dataset_name}:{index}: missing request")
-    return errors
-
-
-def _resolve_backend_path(path_value: str | Path) -> Path:
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return BACKEND_ROOT / path
 
 
 def _patch_api_llm_clients(stack: ExitStack) -> ScriptedLLMClient:

@@ -1,0 +1,23 @@
+{
+  "servers": [
+    {
+      "name": "example",
+      "enabled": false,
+      "transport": "stdio",
+      "command": "example-mcp-server",
+      "args": [],
+      "cwd": "",
+      "env": {},
+      "tool_prefix": "mcp.example",
+      "risk": "network",
+      "read_only": true,
+      "timeout_seconds": 10,
+      "message_framing": "newline"
+    }
+  ],
+  "notes": [
+    "Copy this file to backend/configs/external_mcp_tools.json or set PHASE_DIAGRAM_EXTERNAL_MCP_CONFIG.",
+    "Keep enabled=false until the external MCP server command is installed and trusted.",
+    "Set message_framing to content_length if a server expects Content-Length framed JSON-RPC messages."
+  ]
+}

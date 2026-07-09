@@ -9,6 +9,8 @@ from app.diagnostics import build_system_diagnostics
 from app.state import AgentChatRequest
 from app.thermo.rag_service import ThermoRagService
 from app.thermo.registry import load_thermo_database_cards, retrieve_thermo_database
+from app.tools import ToolExecutor, build_default_tool_registry
+from app.tools.models import ToolCall
 
 if TYPE_CHECKING:
     from app.api import AppDependencies
@@ -50,6 +52,8 @@ class MaterialsMcpFacade:
 
             dependencies = build_app_dependencies()
         self.deps = dependencies
+        self.tool_registry = build_default_tool_registry()
+        self.tool_executor = ToolExecutor(self.tool_registry)
 
     def phase_diagram_run(self, arguments: JSONDict) -> JSONDict:
         message = str(arguments.get("message") or "").strip()
@@ -177,6 +181,31 @@ class MaterialsMcpFacade:
         _ = arguments
         return build_system_diagnostics().model_dump(mode="json")
 
+    def generic_tool_call(self, tool_name: str, arguments: JSONDict) -> JSONDict:
+        message = str(arguments.get("message") or arguments.get("query") or f"MCP call {tool_name}")
+        request = AgentChatRequest(
+            conversation_id=str(arguments.get("conversation_id") or "mcp-tools"),
+            message=message,
+            uploaded_assets=[],
+            conversation_history=[],
+        )
+        run_id = str(arguments.get("run_id") or self.deps.artifact_service.create_run_id())
+        state = {
+            "run_id": run_id,
+            "conversation_id": request.conversation_id,
+            "request": request,
+            "uploaded_assets": [],
+            "last_run_context": request.last_run_context,
+            "tool_results": [],
+            "artifact_messages": [],
+            "trace": [],
+            "plan_steps": [],
+        }
+        context = self.tool_executor.build_context(state, self.deps.artifact_service)
+        payload = {key: value for key, value in arguments.items() if key not in {"message", "conversation_id", "run_id"}}
+        result = self.tool_executor.execute(ToolCall(tool_name=tool_name, arguments=payload, reason="mcp_tool_call"), context)
+        return result.model_dump()
+
 
 class MaterialsMcpServer:
     PROTOCOL_VERSION = "2024-11-05"
@@ -186,7 +215,7 @@ class MaterialsMcpServer:
         self.tools = self._build_tools()
 
     def _build_tools(self) -> dict[str, McpTool]:
-        return {
+        tools = {
             "phase_diagram.run": McpTool(
                 name="phase_diagram.run",
                 description="Run the existing phase diagram runtime using the provided natural-language request and optional structured overrides.",
@@ -317,6 +346,14 @@ class MaterialsMcpServer:
                 handler=self.facade.system_diagnostics,
             ),
         }
+        for spec in self.facade.tool_registry.list_specs():
+            tools[spec.name] = McpTool(
+                name=spec.name,
+                description=f"[Generic tool] {spec.description}",
+                input_schema=spec.input_schema,
+                handler=lambda arguments, tool_name=spec.name: self.facade.generic_tool_call(tool_name, arguments),
+            )
+        return tools
 
     def handle_request(self, request: JSONDict) -> JSONDict | None:
         method = request.get("method")

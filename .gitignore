@@ -28,6 +28,8 @@ env/
 **/.env.local
 !.env.example
 !**/.env.example
+backend/configs/external_mcp_tools.json
+backend/configs/external_mcp_tools.local.json
 
 # Node / frontend builds
 node_modules/

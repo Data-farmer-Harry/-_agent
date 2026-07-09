@@ -37,6 +37,8 @@ from app.state import (
 )
 from app.agents.supervisor import SupervisorAgent
 from app.core.artifacts import ArtifactService
+from app.skills import SkillRouter, build_default_skill_registry
+from app.tools import ToolExecutor, ToolRouter, build_default_tool_registry
 
 
 def retrieval_metadata_like(retrieval: dict[str, Any] | None) -> dict[str, Any]:
@@ -67,6 +69,9 @@ class AgentAppGraph:
         compute_agent: ComputeAgent,
         chat_agent: ChatAgent,
         shared_memory_service: SharedMemoryService | None = None,
+        tool_router: ToolRouter | None = None,
+        tool_executor: ToolExecutor | None = None,
+        skill_router: SkillRouter | None = None,
     ) -> None:
         self.artifact_service = artifact_service
         self.memory_store = memory_store
@@ -78,6 +83,10 @@ class AgentAppGraph:
         self.recognition_agent = recognition_agent
         self.compute_agent = compute_agent
         self.chat_agent = chat_agent
+        tool_registry = build_default_tool_registry()
+        self.tool_router = tool_router or ToolRouter(tool_registry)
+        self.tool_executor = tool_executor or ToolExecutor(tool_registry)
+        self.skill_router = skill_router or SkillRouter(build_default_skill_registry())
         self.graph = self._build_graph()
 
     @staticmethod
@@ -97,6 +106,7 @@ class AgentAppGraph:
         output_data: dict[str, Any],
         description: str,
         stage: str,
+        artifacts: list[ArtifactRef] | None = None,
     ) -> dict[str, Any]:
         envelope = build_agent_envelope(
             run_id=state["run_id"],
@@ -148,7 +158,7 @@ class AgentAppGraph:
             summary=summary,
             input=input_data,
             output=output_data,
-            artifacts=[],
+            artifacts=artifacts or [],
             metadata={"agent_protocol": envelope.public_metadata()},
         )
         plan_steps = [*state.get("plan_steps", []), final_step]
@@ -539,7 +549,94 @@ class AgentAppGraph:
         }
         return result
 
+    def _run_tool_policy(self, state: AgentGraphState) -> dict[str, Any]:
+        decision = self.tool_router.decide(state)
+        decision_payload = decision.model_dump()
+        if not decision.need_tool:
+            return {
+                "tool_decision": decision_payload,
+                "response_metadata": {
+                    **state.get("response_metadata", {}),
+                    "tool_policy": decision_payload,
+                    "tool_results": [],
+                },
+            }
+
+        working_state: AgentGraphState = {
+            **state,
+            "tool_results": list(state.get("tool_results", [])),
+            "artifact_messages": list(state.get("artifact_messages", [])),
+        }
+        tool_results: list[dict[str, Any]] = []
+        for call in decision.selected_calls:
+            if call.requires_confirmation or not call.auto_execute:
+                result = self.tool_executor.execute(call, self.tool_executor.build_context(working_state, self.artifact_service))
+            else:
+                result = self.tool_executor.execute(call, self.tool_executor.build_context(working_state, self.artifact_service))
+            result_payload = result.model_dump()
+            tool_results.append(result_payload)
+            updated_artifacts = [*working_state.get("artifact_messages", []), *result.artifacts]
+            step_updates = self._record_step(
+                working_state,
+                tool_name=call.tool_name,
+                success=result.success,
+                summary=result.summary,
+                input_data=call.arguments,
+                output_data=result.output,
+                description=f"Execute generic tool {call.tool_name} selected by ToolPolicy.",
+                stage="tool_call",
+                artifacts=result.artifacts,
+            )
+            working_state = {
+                **working_state,
+                **step_updates,
+                "artifact_messages": updated_artifacts,
+                "tool_results": [*working_state.get("tool_results", []), result_payload],
+            }
+
+        return {
+            "plan_steps": working_state.get("plan_steps", []),
+            "trace": working_state.get("trace", []),
+            "protocol_messages": working_state.get("protocol_messages", []),
+            "artifact_messages": working_state.get("artifact_messages", []),
+            "tool_results": working_state.get("tool_results", []),
+            "tool_decision": decision_payload,
+            "response_metadata": {
+                **state.get("response_metadata", {}),
+                "tool_policy": decision_payload,
+                "tool_results": tool_results,
+            },
+            "response_summary": {
+                **state.get("response_summary", {}),
+                "tool_policy": {
+                    "need_tool": decision.need_tool,
+                    "selected_tools": [call.tool_name for call in decision.selected_calls],
+                },
+            },
+        }
+
+    def _run_skill_router(self, state: AgentGraphState) -> dict[str, Any]:
+        decision = self.skill_router.decide(state)
+        context = self.skill_router.build_context(decision)
+        payload = decision.model_dump()
+        return {
+            "skill_decision": payload,
+            "skill_context": context,
+            "response_metadata": {
+                **state.get("response_metadata", {}),
+                "skill_policy": payload,
+            },
+            "response_summary": {
+                **state.get("response_summary", {}),
+                "skills": [skill["skill_id"] for skill in payload.get("selected_skills", [])],
+            },
+        }
+
     def chat_node(self, state: AgentGraphState) -> dict[str, Any]:
+        skill_updates = self._run_skill_router(state)
+        state = {**state, **skill_updates}
+        tool_updates = self._run_tool_policy(state)
+        state = {**state, **tool_updates}
         chat_result = self.chat_agent.run(state)
         rag_evidence = chat_result.get("rag_evidence") if isinstance(chat_result.get("rag_evidence"), dict) else {}
         shared_writes: list[dict[str, Any]] = []
@@ -829,6 +926,10 @@ class AgentAppGraph:
             "shared_memory_context": {},
             "shared_memory_events": [],
             "protocol_messages": [],
+            "tool_decision": {},
+            "tool_results": [],
+            "skill_decision": {},
+            "skill_context": "",
         }
         self._emit(
             initial_state,

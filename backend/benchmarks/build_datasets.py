@@ -10,10 +10,11 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.lammps.registry import get_lammps_registry_payload
+from benchmarks.benchmark_config import BENCHMARK_DATASET_DIR
 from examples.verify_phase_diagram_cases import default_thermo_cases, make_payload
 
 
-DATASET_DIR = Path(__file__).resolve().parent / "datasets"
+DATASET_DIR = BENCHMARK_DATASET_DIR
 ASSET_DIR = Path(__file__).resolve().parent / "assets" / "external_phase_diagrams"
 ASSET_REL_DIR = Path("benchmarks") / "assets" / "external_phase_diagrams"
 

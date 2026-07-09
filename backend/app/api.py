@@ -215,6 +215,16 @@ def create_app(dependencies: AppDependencies | None = None) -> FastAPI:
     def system_diagnostics() -> SystemDiagnosticsResponse:
         return build_system_diagnostics()
 
+    @app.get("/api/tools/catalog")
+    def tools_catalog() -> JSONResponse:
+        catalog = deps.agent_graph.tool_router.registry.public_catalog()
+        return JSONResponse({"count": len(catalog), "tools": catalog})
+
+    @app.get("/api/skills/catalog")
+    def skills_catalog() -> JSONResponse:
+        catalog = deps.agent_graph.skill_router.registry.public_catalog()
+        return JSONResponse({"count": len(catalog), "skills": catalog})
+
     @app.get("/api/lammps/registry")
     def lammps_registry() -> JSONResponse:
         return JSONResponse(get_lammps_registry_payload())

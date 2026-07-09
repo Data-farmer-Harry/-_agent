@@ -6,15 +6,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 try:
+    from benchmarks.benchmark_config import BENCHMARK_DATASET_DIR
     from benchmarks.versioning import build_freeze_manifest, scan_case_data_leakage
 except ModuleNotFoundError:  # pragma: no cover - package import fallback
+    from .benchmark_config import BENCHMARK_DATASET_DIR
     from .versioning import build_freeze_manifest, scan_case_data_leakage
 
 
 MATERIALS_AGENT_BENCH_VERSION = "materials-agent-bench/v1"
 NOT_APPLICABLE = "not_applicable"
 
-BENCHMARK_DATASET_DIR = Path(__file__).resolve().parent / "datasets"
 DEFAULT_MATERIALS_AGENT_BENCH_DIR = BENCHMARK_DATASET_DIR / "materials_agent_bench"
 
 BenchmarkMode = Literal["deterministic", "real", "live"]

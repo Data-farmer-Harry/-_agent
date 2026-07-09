@@ -552,3 +552,7 @@ class AgentGraphState(TypedDict, total=False):
     shared_memory_context: dict[str, Any]
     shared_memory_events: list[dict[str, Any]]
     protocol_messages: list[AgentEnvelope]
+    tool_decision: dict[str, Any]
+    tool_results: list[dict[str, Any]]
+    skill_decision: dict[str, Any]
+    skill_context: str
