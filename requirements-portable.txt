@@ -1,0 +1,49 @@
+# MatterPilot portable Python requirements
+#
+# Recommended runtime:
+#   Python 3.12
+#   pip from a Conda or virtualenv environment
+#
+# Portable install example:
+#   conda create -n lammps_agent python=3.12 pip
+#   conda activate lammps_agent
+#   python -m pip install -r requirements-portable.txt
+#
+# Frontend dependencies are intentionally not listed here because they are
+# managed by frontend/package-lock.json. For the frontend, run:
+#   cd frontend && npm ci
+#
+# Host tools that are not Python packages:
+#   LAMMPS executable, configured via LAMMPS_CMD or the runtime settings UI
+#   ffmpeg, used for browser-friendly trajectory media conversion
+#   EAM potential files, configured via POTENTIALS_DIR
+#
+# OVITO is included to preserve current visualization capability. If a target
+# platform cannot install OVITO or you do not need GIF/MP4 trajectory rendering,
+# comment out ovito==3.15.1 and use an external ovitos executable instead.
+
+# Backend API and agent runtime
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+pydantic==2.11.3
+langgraph==0.2.56
+requests==2.32.5
+
+# Scientific computing and plotting
+numpy==2.2.4
+pandas==2.2.3
+scipy==1.15.2
+matplotlib==3.10.8
+pillow==12.1.1
+plotly==6.0.1
+pycalphad==0.11.0
+
+# RAG vector index
+sqlite-vec==0.1.9
+
+# Optional but currently enabled visualization stack
+ovito==3.15.1
+
+# Test and local development tools
+pytest==9.0.2
+httpx==0.28.1

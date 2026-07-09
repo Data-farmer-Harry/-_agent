@@ -17,6 +17,7 @@ This script intentionally preserves:
   - backend/configs/thermo_databases
   - benchmark datasets and source code
   - backend/outputs/.gitkeep
+  - local .env files
 EOF
 }
 
@@ -38,6 +39,7 @@ done
 
 targets=(
   "$ROOT/frontend/dist"
+  "$ROOT/frontend/.vite"
   "$ROOT/.pytest_cache"
   "$ROOT/backend/.pytest_cache"
 )
@@ -83,11 +85,26 @@ while IFS= read -r cache_dir; do
   fi
 done < <(
   find \
+    "$ROOT/scripts" \
     "$ROOT/backend/app" \
     "$ROOT/backend/tests" \
     "$ROOT/backend/examples" \
     "$ROOT/backend/benchmarks" \
+    "$ROOT/frontend/src" \
     -type d -name __pycache__ 2>/dev/null | sort
+)
+
+while IFS= read -r generated_file; do
+  if [[ "$APPLY" -eq 1 ]]; then
+    echo "Removing: $generated_file"
+    rm -f "$generated_file"
+  else
+    echo "Would remove: $generated_file"
+  fi
+done < <(
+  find "$ROOT" \
+    -path "$ROOT/.git" -prune -o \
+    -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -print 2>/dev/null | sort
 )
 
 if [[ "$APPLY" -eq 0 ]]; then

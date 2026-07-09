@@ -53,7 +53,7 @@ QUICK_PYTEST_TARGETS := \
 	tests/test_benchmark_gate.py \
 	tests/test_secret_scan.py
 
-.PHONY: help test-quick test-backend-quick test-secret-scan test-dataset-validate test-materials-bench-freeze freeze-materials-agent-bench test-frontend-build test-full test-benchmark-gate audit-advanced-agent record-benchmark-baseline test-lammps-real test-orchestration test-live-backends test-live record-lammps-baseline clean-outputs-dry-run
+.PHONY: help test-quick test-backend-quick test-secret-scan test-dataset-validate test-materials-bench-freeze freeze-materials-agent-bench test-frontend-build test-full test-benchmark-gate audit-advanced-agent record-benchmark-baseline test-lammps-real test-orchestration test-live-backends test-live record-lammps-baseline clean-outputs-dry-run clean-local clean-local-with-node-modules
 
 help:
 	@echo "Targets:"
@@ -70,7 +70,9 @@ help:
 	@echo "  make test-live-backends  # live embedding/reranker/Judge backend gate without frontend API dependency"
 	@echo "  make record-lammps-baseline # record LAMMPS contract baseline JSON/Markdown under backend/outputs"
 	@echo "  make test-live           # live/API-dependent benchmark suites against API_BASE=$(API_BASE)"
-	@echo "  make clean-outputs-dry-run"
+	@echo "  make clean-outputs-dry-run # preview local generated files that can be removed"
+	@echo "  make clean-local         # remove generated outputs, caches, dist, pyc, and .DS_Store"
+	@echo "  make clean-local-with-node-modules # also remove frontend/node_modules"
 	@echo ""
 	@echo "Default local/CI test targets run with OFFLINE_TEST_ENV so local API keys do not affect deterministic gates."
 	@echo "Use make test-live-backends or make test-live for explicit network/provider validation."
@@ -162,3 +164,9 @@ test-live:
 
 clean-outputs-dry-run:
 	$(BACKEND_DIR)/examples/cleanup_outputs.sh
+
+clean-local:
+	$(BACKEND_DIR)/examples/cleanup_outputs.sh --apply
+
+clean-local-with-node-modules:
+	$(BACKEND_DIR)/examples/cleanup_outputs.sh --apply --include-node-modules

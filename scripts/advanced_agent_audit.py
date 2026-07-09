@@ -113,9 +113,20 @@ def audit_roadmap(path: Path) -> dict[str, Any]:
     )
 
 
-def audit_benchmark_report(path: Path, *, min_suites: int, min_threshold_checks: int) -> dict[str, Any]:
+def audit_benchmark_report(path: Path, *, min_suites: int, min_threshold_checks: int, require_report: bool) -> dict[str, Any]:
     if not path.exists():
-        return _check("deterministic_benchmark_report", False, path=_rel(path), issue="benchmark_report_missing")
+        return _check(
+            "deterministic_benchmark_report",
+            not require_report,
+            path=_rel(path),
+            issue="benchmark_report_missing",
+            required=require_report,
+            note=(
+                "Run make test-full or pass --benchmark-report to audit a fresh deterministic report."
+                if not require_report
+                else "A deterministic benchmark report is required for this audit."
+            ),
+        )
     report = _load_json(path)
     threshold_checks = report.get("threshold_checks") if isinstance(report.get("threshold_checks"), list) else []
     failed_thresholds = [item for item in threshold_checks if not isinstance(item, dict) or item.get("passed") is not True]
@@ -434,6 +445,7 @@ def build_audit(args: argparse.Namespace) -> dict[str, Any]:
             args.benchmark_report,
             min_suites=args.min_suites,
             min_threshold_checks=args.min_threshold_checks,
+            require_report=args.require_benchmark_report,
         ),
         audit_advanced_capability_surface(args.benchmark_dataset_manifest),
         audit_materials_agent_bench(
@@ -456,6 +468,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Audit advanced agent migration evidence without mutating local state.")
     parser.add_argument("--roadmap", type=Path, default=DEFAULT_ROADMAP)
     parser.add_argument("--benchmark-report", type=Path, default=DEFAULT_BENCHMARK_REPORT)
+    parser.add_argument("--require-benchmark-report", action="store_true")
     parser.add_argument("--benchmark-dataset-manifest", type=Path, default=DEFAULT_BENCHMARK_DATASET_MANIFEST)
     parser.add_argument("--materials-manifest", type=Path, default=DEFAULT_MATERIALS_MANIFEST)
     parser.add_argument("--materials-freeze-lock", type=Path, default=DEFAULT_MATERIALS_FREEZE_LOCK)
