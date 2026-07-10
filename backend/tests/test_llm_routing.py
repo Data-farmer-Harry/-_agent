@@ -8,7 +8,7 @@ from unittest.mock import patch
 from urllib import error
 
 from app.config import settings
-from app.core.llm import LLMClient
+from app.core.llm import LLMClient, llm_call_context
 from app.core.llm_routing import LLMRoute, LLMRouter, LLMRoutingConfig, load_llm_routing_config
 
 
@@ -144,6 +144,52 @@ class LLMRoutingTests(unittest.TestCase):
         self.assertEqual(body["model"], "provider/fast-model")
         self.assertEqual(body["max_tokens"], 50)
         self.assertEqual(client.last_routing_decision["tier"], "fast")
+
+    def test_llm_client_records_safe_routing_telemetry(self) -> None:
+        def fake_urlopen(req, timeout=0):  # type: ignore[no-untyped-def]
+            _ = req, timeout
+            return _FakeResponse("telemetry-ok")
+
+        previous = self._snapshot_settings()
+        self._configure_llm_settings()
+        LLMClient.clear_routing_telemetry()
+        try:
+            router = LLMRouter(
+                LLMRoutingConfig(
+                    routes={"fast": LLMRoute(model="provider/fast-model", api_base_url="https://openrouter.ai/api/v1")},
+                    fallbacks={"fast": ""},
+                )
+            )
+            client = LLMClient(router=router)
+            with llm_call_context(run_id="run-telemetry", request_id="req-telemetry", conversation_id="conv-telemetry"):
+                with patch("app.core.llm.urllib_request.urlopen", side_effect=fake_urlopen):
+                    content = client.chat_text(
+                        system_prompt="Answer briefly.",
+                        user_prompt="unique-private-user-prompt",
+                        max_tokens=100,
+                        capability="telemetry.test",
+                    )
+            snapshot = LLMClient.routing_telemetry_snapshot(run_id="run-telemetry", request_id="req-telemetry")
+        finally:
+            self._restore_settings(previous)
+            LLMClient.clear_routing_telemetry()
+
+        self.assertEqual(content, "telemetry-ok")
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(snapshot["total_calls"], 1)
+        record = snapshot["recent_calls"][0]
+        serialized = json.dumps(record, ensure_ascii=False)
+        self.assertEqual(record["run_id"], "run-telemetry")
+        self.assertEqual(record["request_id"], "req-telemetry")
+        self.assertEqual(record["capability"], "telemetry.test")
+        self.assertEqual(record["model"], "provider/fast-model")
+        self.assertIn("prompt_hash", record)
+        self.assertEqual(record["feature_schema"], "llm-route-features/v1")
+        self.assertIn("feature_values_by_name", record)
+        self.assertIn("log_total_chars", record["feature_values_by_name"])
+        self.assertEqual(len(record["feature_values"]), len(record["feature_names"]))
+        self.assertNotIn("unique-private-user-prompt", serialized)
+        self.assertNotIn("test-key", serialized)
 
     def test_llm_client_escalates_to_fallback_route_after_error(self) -> None:
         called_models: list[str] = []

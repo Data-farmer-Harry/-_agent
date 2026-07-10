@@ -422,6 +422,20 @@ conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py
 
 当前默认训练规模约 3266 条样本，其中 mixed/adversarial/long_noise 超过一半；本地最近一次训练的 holdout test macro-F1 约 0.9958，probe set macro-F1 为 1.0000。这个结果仍然只是 synthetic baseline，适合冷启动；后续应逐步用真实调用 telemetry 替换或混合训练。
 
+如果已经跑过真实 LLM API，路由层会把隐私安全的 MLP 特征写入 observability log。日志只包含 feature vector、prompt hash、长度、路由档位、耗时、fallback 和成功状态，不保存 prompt 原文和 API key。可以把真实 telemetry 混入训练：
+
+```bash
+conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py --include-telemetry
+```
+
+也可以只用真实 telemetry 训练，适合积累了足够样本之后做对照实验：
+
+```bash
+conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py --telemetry-only --telemetry-max-rows 5000
+```
+
+训练脚本默认读取 `backend/outputs/logs/events.jsonl` 中的 `llm.routing_call` 事件。只有包含 `llm-route-features/v1` 特征的记录才会被使用；失败调用默认跳过，因为它们更像负样本而不是干净标签。如果需要做鲁棒性分析，可以加 `--include-failed-telemetry`。
+
 在 `backend/configs/llm_routing.json` 中设置 `learned_policy.enabled=true` 后，神经网络有两种使用方式：`shadow` 只记录推荐、不改变最终路由；`guarded` 会在置信度超过阈值后接管，但仍受 `capability_min_tiers` 保护，例如 LAMMPS 修复、审查、judge 不会被降级到低风险档位。
 
 ## 18. 常用 Makefile 命令

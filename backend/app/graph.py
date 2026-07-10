@@ -19,7 +19,7 @@ from app.shared_memory.agent_integration import (
 )
 from app.agents.recognition import RecognitionAgent
 from app.core.agent_protocol import build_agent_envelope, summarize_protocol_messages
-from app.core.llm import LLMRequiredError
+from app.core.llm import LLMClient, LLMRequiredError, llm_call_context
 from app.core.observability import log_event, new_request_id
 from app.state import (
     AgentChatRequest,
@@ -824,6 +824,171 @@ class AgentAppGraph:
         graph.add_edge("respond", END)
         return graph.compile()
 
+    @staticmethod
+    def _dict_payload(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "model_dump"):
+            dumped = value.model_dump(mode="json")
+            return dumped if isinstance(dumped, dict) else {}
+        return {}
+
+    @staticmethod
+    def _list_payload(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    @classmethod
+    def _summarize_materials_rag(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        materials = cls._dict_payload(payload.get("materials_rag"))
+        if not materials:
+            return {"available": False}
+        planning = cls._dict_payload(materials.get("planning"))
+        error_diagnosis = cls._dict_payload(materials.get("error_diagnosis"))
+        planning_hits = cls._list_payload(planning.get("hits"))
+        error_hits = cls._list_payload(error_diagnosis.get("hits"))
+        titles = [str(item) for item in cls._list_payload(materials.get("titles")) if str(item).strip()]
+        for hit in [*planning_hits, *error_hits]:
+            hit_payload = cls._dict_payload(hit)
+            title = str(hit_payload.get("title") or "").strip()
+            if title and title not in titles:
+                titles.append(title)
+        hit_count = materials.get("hit_count")
+        if not isinstance(hit_count, int):
+            hit_count = len(planning_hits) + len(error_hits)
+        return {
+            "available": True,
+            "used": bool(materials.get("used")) or hit_count > 0,
+            "hit_count": hit_count,
+            "planning_hit_count": len(planning_hits),
+            "error_hit_count": len(error_hits),
+            "domain": materials.get("domain") or planning.get("domain") or error_diagnosis.get("domain") or "",
+            "doc_type": materials.get("doc_type") or planning.get("doc_type") or error_diagnosis.get("doc_type") or "",
+            "material": materials.get("material") or planning.get("material") or error_diagnosis.get("material") or "",
+            "query": materials.get("query") or planning.get("query") or error_diagnosis.get("query") or "",
+            "titles": titles[:8],
+        }
+
+    @classmethod
+    def _summarize_thermo_rag(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        thermo = cls._dict_payload(payload.get("thermo_lookup")) or cls._dict_payload(payload.get("thermo_rag"))
+        if not thermo:
+            return {"available": False}
+        candidates = cls._list_payload(thermo.get("candidates"))
+        top_candidate = cls._dict_payload(candidates[0]) if candidates else {}
+        return {
+            "available": True,
+            "matched": thermo.get("matched"),
+            "query": thermo.get("query") or "",
+            "selection_strategy": thermo.get("selection_strategy") or "",
+            "embedding_backend": thermo.get("embedding_backend") or "",
+            "candidate_count": len(candidates),
+            "top_candidate": {
+                "system_name": top_candidate.get("system_name") or "",
+                "database_name": top_candidate.get("database_name") or "",
+                "score": top_candidate.get("score"),
+                "source_url": top_candidate.get("source_url") or "",
+            },
+        }
+
+    @classmethod
+    def _summarize_shared_memory(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        shared = cls._dict_payload(payload.get("shared_memory"))
+        if not shared:
+            return {"available": False}
+        retrieval = cls._dict_payload(shared.get("retrieval"))
+        selected_ids = cls._list_payload(retrieval.get("selected_item_ids"))
+        forced_ids = cls._list_payload(retrieval.get("forced_retention_ids"))
+        return {
+            "available": True,
+            "stage": shared.get("stage") or "",
+            "retrieval_available": retrieval.get("available"),
+            "backend": retrieval.get("backend") or "",
+            "selected_count": len(selected_ids),
+            "forced_retention_count": len(forced_ids),
+            "write_count": shared.get("write_count", 0),
+            "conflict_count": shared.get("conflict_count", 0),
+            "needs_user_count": shared.get("needs_user_count", 0),
+            "unsafe_write_count": shared.get("unsafe_write_count", 0),
+            "error": shared.get("error") or retrieval.get("error") or "",
+        }
+
+    @classmethod
+    def _build_agent_observability(
+        cls,
+        *,
+        state: AgentGraphState,
+        route: TaskRoute,
+        metadata: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        combined_payload = {**summary, **metadata}
+        tool_policy = cls._dict_payload(state.get("tool_decision")) or cls._dict_payload(combined_payload.get("tool_policy"))
+        tool_results = cls._list_payload(state.get("tool_results")) or cls._list_payload(combined_payload.get("tool_results"))
+        skill_policy = cls._dict_payload(state.get("skill_decision")) or cls._dict_payload(combined_payload.get("skill_policy"))
+        selected_calls = cls._list_payload(tool_policy.get("selected_calls"))
+        trace_payload = []
+        for observation in state.get("trace", [])[-12:]:
+            observation_payload = cls._dict_payload(observation)
+            trace_payload.append(
+                {
+                    "step_index": observation_payload.get("step_index"),
+                    "tool_name": observation_payload.get("tool_name") or "",
+                    "success": observation_payload.get("success"),
+                    "summary": observation_payload.get("summary") or "",
+                    "artifact_count": len(cls._list_payload(observation_payload.get("artifacts"))),
+                }
+            )
+
+        return {
+            "schema_version": "agent_observability.v1",
+            "route": {
+                "name": route.name,
+                "reason": route.reason,
+                "selected_tool": route.selected_tool,
+                "intent": route.intent,
+                "decision_source": route.decision_source,
+                "decision_confidence": route.decision_confidence,
+                "compute_domain": route.compute_domain,
+                "next_step": state.get("next_step", ""),
+                "supervisor_decision": cls._dict_payload(state.get("supervisor_decision")),
+            },
+            "tools": {
+                "policy": tool_policy,
+                "need_tool": tool_policy.get("need_tool") if tool_policy else False,
+                "selected_tools": [
+                    str(cls._dict_payload(call).get("tool_name") or "")
+                    for call in selected_calls
+                    if str(cls._dict_payload(call).get("tool_name") or "").strip()
+                ],
+                "result_count": len(tool_results),
+                "success_count": sum(1 for item in tool_results if cls._dict_payload(item).get("success") is True),
+                "failure_count": sum(1 for item in tool_results if cls._dict_payload(item).get("success") is False),
+                "results": [
+                    {
+                        "tool_name": cls._dict_payload(item).get("tool_name") or "",
+                        "success": cls._dict_payload(item).get("success"),
+                        "summary": cls._dict_payload(item).get("summary") or "",
+                        "error": cls._dict_payload(item).get("error") or "",
+                        "artifact_count": len(cls._list_payload(cls._dict_payload(item).get("artifacts"))),
+                        "metadata": cls._dict_payload(item).get("metadata") or {},
+                    }
+                    for item in tool_results[-8:]
+                ],
+                "trace": trace_payload,
+                "skills": skill_policy,
+            },
+            "rag": {
+                "materials": cls._summarize_materials_rag(combined_payload),
+                "thermo": cls._summarize_thermo_rag(combined_payload),
+                "shared_memory": cls._summarize_shared_memory(combined_payload),
+            },
+            "llm_routing": LLMClient.routing_telemetry_snapshot(
+                run_id=state.get("run_id", ""),
+                request_id=state.get("request_id", ""),
+                limit=12,
+            ),
+        }
+
     def _build_response(self, state: AgentGraphState) -> AgentRunResponse:
         compute_response = state.get("phase_diagram_result") or state.get("lammps_result")
         route = state.get("route") or TaskRoute(name="conversation.answer", reason="")
@@ -841,6 +1006,12 @@ class AgentAppGraph:
                 "shared_memory_events": state.get("shared_memory_events", [])[-8:],
             }
             summary = {"request_message": request_message, "request_id": state.get("request_id", ""), **compute_response.summary}
+            metadata["agent_observability"] = self._build_agent_observability(
+                state=state,
+                route=route,
+                metadata=metadata,
+                summary=summary,
+            )
             return AgentRunResponse(
                 success=bool(compute_response.success),
                 run_id=state["run_id"],
@@ -863,6 +1034,20 @@ class AgentAppGraph:
                 run_status=compute_response.run_status,
             )
 
+        metadata = {
+            **state.get("response_metadata", {}),
+            "request_id": state.get("request_id", ""),
+            "current_context_summary": state.get("current_context_summary", ""),
+            "agent_protocol": protocol_summary,
+            "shared_memory_events": state.get("shared_memory_events", [])[-8:],
+        }
+        summary = {"request_message": request_message, "request_id": state.get("request_id", ""), **state.get("response_summary", {})}
+        metadata["agent_observability"] = self._build_agent_observability(
+            state=state,
+            route=route,
+            metadata=metadata,
+            summary=summary,
+        )
         return AgentRunResponse(
             success=bool(state.get("success", True)),
             run_id=state["run_id"],
@@ -878,16 +1063,10 @@ class AgentAppGraph:
             html_content=state.get("html_content"),
             html_path=state.get("html_path"),
             termination_reason=state.get("termination_reason", "conversation_answered"),
-            metadata={
-                **state.get("response_metadata", {}),
-                "request_id": state.get("request_id", ""),
-                "current_context_summary": state.get("current_context_summary", ""),
-                "agent_protocol": protocol_summary,
-                "shared_memory_events": state.get("shared_memory_events", [])[-8:],
-            },
+            metadata=metadata,
             recognition_result=state.get("recognition_result"),
             current_context_summary=state.get("current_context_summary", ""),
-            summary={"request_message": request_message, "request_id": state.get("request_id", ""), **state.get("response_summary", {})},
+            summary=summary,
         )
 
     def run_chat(self, request: AgentChatRequest, event_sink=None) -> AgentRunResponse:
@@ -948,8 +1127,13 @@ class AgentAppGraph:
             route_name=initial_route.name,
         )
         try:
-            final_state = self.graph.invoke(initial_state)
-            response = self._build_response(final_state)
+            with llm_call_context(
+                run_id=run_id,
+                request_id=request_id,
+                conversation_id=request.conversation_id,
+            ):
+                final_state = self.graph.invoke(initial_state)
+                response = self._build_response(final_state)
         except Exception as exc:  # noqa: BLE001
             final_state = {
                 **initial_state,
@@ -958,6 +1142,20 @@ class AgentAppGraph:
                 "termination_reason": "llm_required" if isinstance(exc, LLMRequiredError) else "graph_execution_failed",
                 "final_answer": str(exc),
             }
+            error_metadata = {
+                **final_state.get("response_metadata", {}),
+                "current_context_summary": final_state.get("current_context_summary", ""),
+                "error_type": exc.__class__.__name__,
+                "request_id": request_id,
+                "shared_memory_events": final_state.get("shared_memory_events", [])[-8:],
+            }
+            error_summary = {"request_message": request.message, "request_id": request_id, **final_state.get("response_summary", {})}
+            error_metadata["agent_observability"] = self._build_agent_observability(
+                state=final_state,
+                route=final_state["route"],
+                metadata=error_metadata,
+                summary=error_summary,
+            )
             response = AgentRunResponse(
                 success=False,
                 run_id=run_id,
@@ -973,16 +1171,10 @@ class AgentAppGraph:
                 html_content=final_state.get("html_content"),
                 html_path=final_state.get("html_path"),
                 termination_reason=final_state["termination_reason"],
-                metadata={
-                    **final_state.get("response_metadata", {}),
-                    "current_context_summary": final_state.get("current_context_summary", ""),
-                    "error_type": exc.__class__.__name__,
-                    "request_id": request_id,
-                    "shared_memory_events": final_state.get("shared_memory_events", [])[-8:],
-                },
+                metadata=error_metadata,
                 recognition_result=final_state.get("recognition_result"),
                 current_context_summary=final_state.get("current_context_summary", ""),
-                summary={"request_message": request.message, "request_id": request_id, **final_state.get("response_summary", {})},
+                summary=error_summary,
             )
             self._emit(
                 final_state,

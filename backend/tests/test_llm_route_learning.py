@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from app.core.llm_route_learning import LearnedPolicyConfig, NeuralRouteModel, feature_names
+from app.core.llm_route_learning import LearnedPolicyConfig, NeuralRouteModel, extract_route_features, feature_names
 from app.core.llm_routing import LLMRoute, LLMRouter, LLMRoutingConfig
-from benchmarks.train_llm_route_mlp import build_synthetic_route_dataset, train_route_mlp
+from benchmarks.train_llm_route_mlp import build_synthetic_route_dataset, load_telemetry_route_dataset, train_route_mlp
 
 
 class LearnedLLMRouteTests(unittest.TestCase):
@@ -96,6 +97,54 @@ class LearnedLLMRouteTests(unittest.TestCase):
         self.assertIn("confusion_matrix", metrics["test"])
         self.assertIn("probe", metrics)
         self.assertIn("dataset_distribution", metrics["metadata"])
+
+    def test_telemetry_rows_train_without_prompt_text(self) -> None:
+        features = extract_route_features(
+            system_prompt="Route current request.",
+            user_prompt="private prompt should not be stored",
+            max_tokens=900,
+            temperature=0.1,
+            capability="supervisor.router",
+            multimodal=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "event": "llm.routing_call",
+                        "success": True,
+                        "tier": "balanced",
+                        "capability": "supervisor.router",
+                        "requested_max_tokens": 900,
+                        "temperature": 0.1,
+                        "multimodal": False,
+                        "prompt_hash": "abc123",
+                        "run_id": "run1",
+                        "request_id": "req1",
+                        "feature_schema": "llm-route-features/v1",
+                        "feature_values": {
+                            name: value
+                            for name, value in zip(features.names, features.values, strict=True)
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            telemetry_rows = load_telemetry_route_dataset(events_path)
+            rows = [*build_synthetic_route_dataset(samples_per_class=8, seed=11), *telemetry_rows]
+            model, metrics, _splits = train_route_mlp(rows, hidden_dim=10, epochs=30, seed=11)
+
+        self.assertEqual(len(telemetry_rows), 1)
+        self.assertNotIn("system_prompt", telemetry_rows[0])
+        self.assertNotIn("user_prompt", telemetry_rows[0])
+        self.assertEqual(telemetry_rows[0]["label"], "balanced")
+        self.assertEqual(model.feature_names, feature_names())
+        self.assertGreaterEqual(metrics["test"]["accuracy"], 0.0)
+        self.assertEqual(metrics["metadata"]["dataset_distribution"]["source"]["observability_telemetry"], 1)
 
     @staticmethod
     def _constant_prediction_model(label: str, path: Path) -> Path:

@@ -1,15 +1,50 @@
 from __future__ import annotations
 
+from collections import Counter, deque
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
+import hashlib
 import json
 import re
 import socket
 import ssl
 import time
+from threading import Lock
 from typing import Any
 from urllib import error, request as urllib_request
 
 from app.config import settings
+from app.core.llm_route_learning import extract_route_features
 from app.core.llm_routing import LLMRouter, LLMRoutingDecision
+from app.core.observability import log_event
+
+
+_LLM_CONTEXT_RUN_ID: ContextVar[str] = ContextVar("llm_context_run_id", default="")
+_LLM_CONTEXT_REQUEST_ID: ContextVar[str] = ContextVar("llm_context_request_id", default="")
+_LLM_CONTEXT_CONVERSATION_ID: ContextVar[str] = ContextVar("llm_context_conversation_id", default="")
+_ROUTING_TELEMETRY: deque[dict[str, Any]] = deque(maxlen=1000)
+_ROUTING_TELEMETRY_LOCK = Lock()
+
+
+@contextmanager
+def llm_call_context(*, run_id: str = "", request_id: str = "", conversation_id: str = ""):
+    """Attach graph/run identifiers to downstream LLM routing telemetry.
+
+    The LLM client is shared by many agents and does not receive the graph state
+    directly, so a small contextvar bridge lets us attribute provider calls to a
+    concrete run without leaking prompts or secrets into logs.
+    """
+
+    run_token = _LLM_CONTEXT_RUN_ID.set(run_id)
+    request_token = _LLM_CONTEXT_REQUEST_ID.set(request_id)
+    conversation_token = _LLM_CONTEXT_CONVERSATION_ID.set(conversation_id)
+    try:
+        yield
+    finally:
+        _LLM_CONTEXT_CONVERSATION_ID.reset(conversation_token)
+        _LLM_CONTEXT_REQUEST_ID.reset(request_token)
+        _LLM_CONTEXT_RUN_ID.reset(run_token)
 
 
 class LLMRequiredError(RuntimeError):
@@ -33,6 +68,175 @@ class LLMClient:
         self.router = router or LLMRouter()
         self.last_routing_decision: dict[str, object] | None = None
         self.routing_history: list[dict[str, object]] = []
+
+    @staticmethod
+    def _prompt_digest(*parts: str) -> str:
+        joined = "\n".join(parts)
+        return hashlib.sha256(joined.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    @staticmethod
+    def _compact_error(exc: Exception | None, *, limit: int = 240) -> str:
+        if exc is None:
+            return ""
+        text = " ".join(str(exc).split())
+        if len(text) <= limit:
+            return text
+        return f"{text[: max(limit - 3, 1)].rstrip()}..."
+
+    @classmethod
+    def clear_routing_telemetry(cls) -> None:
+        with _ROUTING_TELEMETRY_LOCK:
+            _ROUTING_TELEMETRY.clear()
+
+    @classmethod
+    def routing_telemetry_snapshot(
+        cls,
+        *,
+        run_id: str = "",
+        request_id: str = "",
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        with _ROUTING_TELEMETRY_LOCK:
+            records = list(_ROUTING_TELEMETRY)
+            window_size = len(_ROUTING_TELEMETRY)
+
+        if run_id:
+            records = [record for record in records if record.get("run_id") == run_id]
+        if request_id:
+            records = [record for record in records if record.get("request_id") == request_id]
+
+        recent = list(reversed(records[-max(1, limit) :]))
+        successful = [record for record in records if record.get("success") is True]
+        latency_values = [float(record.get("duration_ms") or 0.0) for record in records if record.get("duration_ms") is not None]
+        tier_counts = Counter(str(record.get("tier") or "unknown") for record in records)
+        capability_counts = Counter(str(record.get("capability") or "general") for record in records)
+        return {
+            "available": bool(records),
+            "total_calls": len(records),
+            "window_size": window_size,
+            "recent_calls": recent,
+            "tier_counts": dict(tier_counts),
+            "capability_counts": dict(capability_counts),
+            "fallback_count": sum(1 for record in records if record.get("fallback_from")),
+            "success_rate": (len(successful) / len(records)) if records else None,
+            "avg_latency_ms": (sum(latency_values) / len(latency_values)) if latency_values else None,
+        }
+
+    def _record_routing_telemetry(
+        self,
+        *,
+        decision: LLMRoutingDecision,
+        attempted_decisions: list[LLMRoutingDecision],
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        capability: str,
+        multimodal: bool,
+        started_at: float,
+        success: bool,
+        response_text: str = "",
+        error_exc: Exception | None = None,
+        first_error_exc: Exception | None = None,
+        fallback_from: str = "",
+    ) -> None:
+        attempted_tiers = [item.tier for item in attempted_decisions]
+        attempted_models = [item.route.effective_model() for item in attempted_decisions]
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        prompt_chars = len(system_prompt) + len(user_prompt)
+        route_payload = decision.route.public_payload()
+        route_features = extract_route_features(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            capability=decision.capability or capability,
+            multimodal=multimodal,
+        )
+        feature_values_by_name = {
+            name: float(value)
+            for name, value in zip(route_features.names, route_features.values, strict=True)
+        }
+        record: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": _LLM_CONTEXT_RUN_ID.get(),
+            "request_id": _LLM_CONTEXT_REQUEST_ID.get(),
+            "conversation_id": _LLM_CONTEXT_CONVERSATION_ID.get(),
+            "tier": decision.tier,
+            "score": decision.score,
+            "capability": decision.capability or capability or "general",
+            "reasons": list(decision.reasons),
+            "fallback_tier": decision.fallback_tier,
+            "fallback_from": fallback_from,
+            "escalation_depth": decision.escalation_depth,
+            "model": decision.route.effective_model(),
+            "api_base_url": decision.route.effective_api_base_url(),
+            "timeout_seconds": decision.route.effective_timeout_seconds(),
+            "effective_max_tokens": decision.route.effective_token_budget(max_tokens),
+            "requested_max_tokens": max_tokens,
+            "temperature": decision.route.effective_temperature(temperature),
+            "multimodal": multimodal,
+            "prompt_chars": prompt_chars,
+            "prompt_hash": self._prompt_digest(system_prompt, user_prompt),
+            "feature_schema": "llm-route-features/v1",
+            "feature_names": list(route_features.names),
+            "feature_values": list(route_features.values),
+            "feature_values_by_name": feature_values_by_name,
+            "feature_debug": route_features.debug,
+            "response_chars": len(response_text),
+            "success": success,
+            "duration_ms": duration_ms,
+            "attempted_tiers": attempted_tiers,
+            "attempted_models": attempted_models,
+            "retry_budget": settings.llm_request_max_retries,
+            "learned_policy_reasons": [reason for reason in decision.reasons if reason.startswith("learned_")],
+            "route": {
+                "model": route_payload.get("model"),
+                "api_base_url": route_payload.get("api_base_url"),
+                "api_key_env": route_payload.get("api_key_env"),
+                "api_key_set": route_payload.get("api_key_set"),
+                "timeout_seconds": route_payload.get("timeout_seconds"),
+                "max_tokens": route_payload.get("max_tokens"),
+                "temperature": route_payload.get("temperature"),
+                "enable_thinking": route_payload.get("enable_thinking"),
+            },
+        }
+        if error_exc is not None:
+            record["error_type"] = error_exc.__class__.__name__
+            record["error"] = self._compact_error(error_exc)
+        if first_error_exc is not None:
+            record["first_error_type"] = first_error_exc.__class__.__name__
+            record["first_error"] = self._compact_error(first_error_exc)
+
+        with _ROUTING_TELEMETRY_LOCK:
+            _ROUTING_TELEMETRY.append(record)
+
+        try:
+            log_event(
+                "llm.routing_call",
+                level="info" if success else "warning",
+                request_id=str(record["request_id"]),
+                run_id=str(record["run_id"]),
+                conversation_id=str(record["conversation_id"]),
+                message=f"LLM routed to {decision.tier}/{decision.route.effective_model()}",
+                tier=decision.tier,
+                score=decision.score,
+                capability=record["capability"],
+                success=success,
+                duration_ms=duration_ms,
+                fallback_from=fallback_from,
+                attempted_tiers=attempted_tiers,
+                model=decision.route.effective_model(),
+                prompt_chars=prompt_chars,
+                prompt_hash=record["prompt_hash"],
+                feature_schema=record["feature_schema"],
+                feature_values=feature_values_by_name,
+                feature_debug=route_features.debug,
+                error=record.get("error", ""),
+            )
+        except Exception:
+            # Observability must never break the actual model call path.
+            return
 
     @staticmethod
     def is_configured() -> bool:
@@ -188,6 +392,7 @@ class LLMClient:
         capability: str = "",
         multimodal: bool = False,
     ) -> str:
+        started_at = time.perf_counter()
         decision = self.router.decide(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -198,19 +403,93 @@ class LLMClient:
         )
         self._remember_route(decision)
         try:
-            return self._post_messages(messages, max_tokens=max_tokens, temperature=temperature, decision=decision)
+            content = self._post_messages(messages, max_tokens=max_tokens, temperature=temperature, decision=decision)
+            self._record_routing_telemetry(
+                decision=decision,
+                attempted_decisions=[decision],
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                capability=capability,
+                multimodal=multimodal,
+                started_at=started_at,
+                success=True,
+                response_text=content,
+            )
+            return content
         except RuntimeError as exc:
             fallback = self.router.fallback_decision(decision, error_message=str(exc))
             if fallback is None:
+                self._record_routing_telemetry(
+                    decision=decision,
+                    attempted_decisions=[decision],
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    capability=capability,
+                    multimodal=multimodal,
+                    started_at=started_at,
+                    success=False,
+                    error_exc=exc,
+                )
                 raise
             if self._route_signature(fallback, max_tokens=max_tokens, temperature=temperature) == self._route_signature(
                 decision,
                 max_tokens=max_tokens,
                 temperature=temperature,
             ):
+                self._record_routing_telemetry(
+                    decision=decision,
+                    attempted_decisions=[decision],
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    capability=capability,
+                    multimodal=multimodal,
+                    started_at=started_at,
+                    success=False,
+                    error_exc=exc,
+                )
                 raise
             self._remember_route(fallback)
-            return self._post_messages(messages, max_tokens=max_tokens, temperature=temperature, decision=fallback)
+            try:
+                content = self._post_messages(messages, max_tokens=max_tokens, temperature=temperature, decision=fallback)
+            except RuntimeError as fallback_exc:
+                self._record_routing_telemetry(
+                    decision=fallback,
+                    attempted_decisions=[decision, fallback],
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    capability=capability,
+                    multimodal=multimodal,
+                    started_at=started_at,
+                    success=False,
+                    error_exc=fallback_exc,
+                    first_error_exc=exc,
+                    fallback_from=decision.tier,
+                )
+                raise
+            self._record_routing_telemetry(
+                decision=fallback,
+                attempted_decisions=[decision, fallback],
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                capability=capability,
+                multimodal=multimodal,
+                started_at=started_at,
+                success=True,
+                response_text=content,
+                first_error_exc=exc,
+                fallback_from=decision.tier,
+            )
+            return content
 
     def chat_text(
         self,

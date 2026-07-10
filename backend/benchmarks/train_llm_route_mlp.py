@@ -24,6 +24,7 @@ from app.core.llm_route_learning import (  # noqa: E402
 
 LABEL_TO_ID = {label: index for index, label in enumerate(LEARNED_ROUTE_LABELS)}
 ID_TO_LABEL = {index: label for label, index in LABEL_TO_ID.items()}
+FEATURE_NAMES = feature_names()
 
 
 def build_synthetic_route_dataset(
@@ -40,6 +41,72 @@ def build_synthetic_route_dataset(
     if include_challenge_cases:
         rows.extend(build_route_challenge_cases(seed=seed + 17, repeats=max(2, samples_per_class // 120)))
     rng.shuffle(rows)
+    return rows
+
+
+def load_telemetry_route_dataset(
+    events_path: Path,
+    *,
+    max_rows: int = 2500,
+    include_failed: bool = False,
+) -> list[dict[str, object]]:
+    """Build privacy-safe route samples from observability logs.
+
+    The log records must contain precomputed feature vectors. This function does
+    not need, read, or reconstruct prompt text; labels come from the actually
+    selected final tier. Failed calls are skipped by default because they are
+    noisy negative evidence rather than a clean target.
+    """
+
+    if not events_path.exists():
+        return []
+
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for line_number, line in enumerate(events_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if len(rows) >= max_rows:
+            break
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("event") != "llm.routing_call":
+            continue
+        if record.get("success") is False and not include_failed:
+            continue
+        label = str(record.get("tier") or "").strip()
+        if label not in LABEL_TO_ID:
+            continue
+        values = _feature_values_from_telemetry(record)
+        if values is None:
+            continue
+        prompt_hash = str(record.get("prompt_hash") or f"line-{line_number}")
+        capability = str(record.get("capability") or "general")
+        dedupe_key = (prompt_hash, capability, label)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        rows.append(
+            {
+                "case_id": f"telemetry.{line_number:06d}.{prompt_hash}",
+                "label": label,
+                "feature_values": values,
+                "feature_schema": "llm-route-features/v1",
+                "capability": capability,
+                "max_tokens": int(record.get("requested_max_tokens") or record.get("effective_max_tokens") or 0),
+                "temperature": float(record.get("temperature") or 0.0),
+                "multimodal": bool(record.get("multimodal")),
+                "difficulty": "telemetry_fallback" if record.get("fallback_from") else "telemetry_success",
+                "source": "observability_telemetry",
+                "prompt_hash": prompt_hash,
+                "request_id": str(record.get("request_id") or ""),
+                "run_id": str(record.get("run_id") or ""),
+                "duration_ms": float(record.get("duration_ms") or 0.0),
+                "fallback_from": str(record.get("fallback_from") or ""),
+            }
+        )
     return rows
 
 
@@ -196,6 +263,10 @@ def render_metrics_markdown(metrics: dict[str, object], *, model_path: Path) -> 
         "",
         "## Summary",
         "",
+        f"Training source: `{metadata.get('training_source', 'unknown')}`",
+        "",
+        f"Synthetic samples: `{metadata.get('synthetic_samples', 'n/a')}` · telemetry samples: `{metadata.get('telemetry_samples', 'n/a')}`",
+        "",
         "| Split | Accuracy | Macro precision | Macro recall | Macro F1 | Weighted F1 | Top-2 accuracy | Log loss |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         _summary_row("train", train),
@@ -227,9 +298,26 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.028)
     parser.add_argument("--seed", type=int, default=20260710)
     parser.add_argument("--output-dir", type=Path, default=BACKEND_ROOT / "outputs" / "llm_route_mlp")
+    parser.add_argument("--include-telemetry", action="store_true", help="Mix privacy-safe real LLM routing telemetry into training.")
+    parser.add_argument("--telemetry-only", action="store_true", help="Train only from telemetry rows; useful once enough real data exists.")
+    parser.add_argument("--telemetry-path", type=Path, default=BACKEND_ROOT / "outputs" / "logs" / "events.jsonl")
+    parser.add_argument("--telemetry-max-rows", type=int, default=2500)
+    parser.add_argument("--include-failed-telemetry", action="store_true", help="Include failed LLM calls as noisy observed labels.")
     args = parser.parse_args()
 
-    rows = build_synthetic_route_dataset(samples_per_class=args.samples_per_class, seed=args.seed)
+    telemetry_rows = (
+        load_telemetry_route_dataset(
+            args.telemetry_path,
+            max_rows=args.telemetry_max_rows,
+            include_failed=args.include_failed_telemetry,
+        )
+        if args.include_telemetry or args.telemetry_only
+        else []
+    )
+    synthetic_rows = [] if args.telemetry_only else build_synthetic_route_dataset(samples_per_class=args.samples_per_class, seed=args.seed)
+    rows = [*synthetic_rows, *telemetry_rows]
+    if not rows:
+        raise SystemExit("No MLP training rows available. Generate synthetic rows or collect telemetry first.")
     model, metrics, splits = train_route_mlp(
         rows,
         hidden_dim=args.hidden_dim,
@@ -237,12 +325,21 @@ def main() -> None:
         learning_rate=args.learning_rate,
         seed=args.seed,
     )
+    metrics["metadata"]["training_source"] = (
+        "telemetry_only" if args.telemetry_only else "synthetic_plus_telemetry" if telemetry_rows else "hard_synthetic_llm_route_cases"
+    )
+    metrics["metadata"]["synthetic_samples"] = len(synthetic_rows)
+    metrics["metadata"]["telemetry_samples"] = len(telemetry_rows)
+    metrics["metadata"]["telemetry_path"] = str(args.telemetry_path)
+    model.metadata.update(metrics["metadata"])  # keep model.json metadata aligned with metrics.json.
     outputs = write_experiment_outputs(model=model, metrics=metrics, splits=splits, output_dir=args.output_dir)
     print(
         json.dumps(
             {
                 "ok": True,
                 "outputs": outputs,
+                "synthetic_samples": len(synthetic_rows),
+                "telemetry_samples": len(telemetry_rows),
                 "dataset_distribution": metrics["metadata"]["dataset_distribution"],  # type: ignore[index]
                 "train": metrics["train"],
                 "test": metrics["test"],
@@ -660,7 +757,7 @@ def _misleading_capability(label: str, rng: np.random.Generator) -> str:
 
 
 def _row_distribution(rows: list[dict[str, object]]) -> dict[str, dict[str, int]]:
-    distribution: dict[str, dict[str, int]] = {"label": {}, "difficulty": {}}
+    distribution: dict[str, dict[str, int]] = {"label": {}, "difficulty": {}, "source": {}}
     for row in rows:
         for key in distribution:
             value = str(row.get(key) or "unknown")
@@ -668,19 +765,53 @@ def _row_distribution(rows: list[dict[str, object]]) -> dict[str, dict[str, int]
     return distribution
 
 
+def _feature_values_from_telemetry(record: dict[str, Any]) -> tuple[float, ...] | None:
+    values_by_name = record.get("feature_values")
+    if isinstance(values_by_name, dict):
+        try:
+            return tuple(float(values_by_name[name]) for name in FEATURE_NAMES)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    values_by_name = record.get("feature_values_by_name")
+    if isinstance(values_by_name, dict):
+        try:
+            return tuple(float(values_by_name[name]) for name in FEATURE_NAMES)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    values = record.get("feature_values")
+    if isinstance(values, list) and len(values) == len(FEATURE_NAMES):
+        try:
+            return tuple(float(value) for value in values)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _feature_values_from_row(row: dict[str, object]) -> tuple[float, ...]:
+    values_payload = row.get("feature_values")
+    if isinstance(values_payload, dict):
+        return tuple(float(values_payload[name]) for name in FEATURE_NAMES)
+    if isinstance(values_payload, (list, tuple)) and len(values_payload) == len(FEATURE_NAMES):
+        return tuple(float(value) for value in values_payload)
+
+    features = extract_route_features(
+        system_prompt=str(row["system_prompt"]),
+        user_prompt=str(row["user_prompt"]),
+        max_tokens=int(row["max_tokens"]),
+        temperature=float(row["temperature"]),
+        capability=str(row["capability"]),
+        multimodal=bool(row["multimodal"]),
+    )
+    return features.values
+
+
 def _rows_to_arrays(rows: list[dict[str, object]]) -> tuple[np.ndarray, np.ndarray]:
     x_values: list[tuple[float, ...]] = []
     y_values: list[int] = []
     for row in rows:
-        features = extract_route_features(
-            system_prompt=str(row["system_prompt"]),
-            user_prompt=str(row["user_prompt"]),
-            max_tokens=int(row["max_tokens"]),
-            temperature=float(row["temperature"]),
-            capability=str(row["capability"]),
-            multimodal=bool(row["multimodal"]),
-        )
-        x_values.append(features.values)
+        x_values.append(_feature_values_from_row(row))
         y_values.append(LABEL_TO_ID[str(row["label"])])
     return np.asarray(x_values, dtype=float), np.asarray(y_values, dtype=int)
 

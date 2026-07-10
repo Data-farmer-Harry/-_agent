@@ -157,6 +157,90 @@ interface RecoveryControlView {
   artifacts: ArtifactRef[];
 }
 
+interface AgentObservabilityRouteView {
+  name: string;
+  computeDomain: string;
+  intent: string;
+  nextStep: string;
+  selectedTool: string;
+  decisionSource: string;
+  confidence: number | null;
+  reason: string;
+}
+
+interface AgentObservabilityToolResult {
+  toolName: string;
+  success: boolean | null;
+  summary: string;
+  error: string;
+  artifactCount: number;
+  source: string;
+}
+
+interface AgentObservabilityToolsView {
+  needTool: boolean | null;
+  selectedTools: string[];
+  allowedCount: number;
+  confidence: number | null;
+  source: string;
+  reason: string;
+  resultCount: number;
+  successCount: number;
+  failureCount: number;
+  results: AgentObservabilityToolResult[];
+  skills: string[];
+}
+
+interface AgentObservabilityRagView {
+  materialsAvailable: boolean;
+  materialsUsed: boolean;
+  materialsHitCount: number;
+  materialsPlanningHits: number;
+  materialsErrorHits: number;
+  material: string;
+  materialsTitles: string[];
+  thermoAvailable: boolean;
+  thermoMatched: boolean | null;
+  thermoCandidateCount: number;
+  thermoStrategy: string;
+  thermoTopDatabase: string;
+  sharedAvailable: boolean;
+  sharedBackend: string;
+  sharedSelectedCount: number;
+  sharedWriteCount: number;
+  sharedConflictCount: number;
+  sharedUnsafeWriteCount: number;
+}
+
+interface AgentObservabilityLlmCall {
+  tier: string;
+  model: string;
+  capability: string;
+  success: boolean | null;
+  durationMs: number | null;
+  score: number | null;
+  fallbackFrom: string;
+  reasons: string[];
+}
+
+interface AgentObservabilityLlmView {
+  available: boolean;
+  totalCalls: number;
+  tierCounts: Record<string, number>;
+  fallbackCount: number;
+  successRate: number | null;
+  avgLatencyMs: number | null;
+  recentCalls: AgentObservabilityLlmCall[];
+}
+
+interface AgentObservabilityView {
+  visible: boolean;
+  route: AgentObservabilityRouteView;
+  tools: AgentObservabilityToolsView;
+  rag: AgentObservabilityRagView;
+  llm: AgentObservabilityLlmView;
+}
+
 const LAMMPS_PREFLIGHT_TOPOLOGY: Record<string, {
   label: string;
   dependencies: string[];
@@ -289,6 +373,164 @@ function formatPercent(value: unknown): string {
 
 function formatNumber(value: unknown, digits = 3): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—';
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function readToolNamesFromCalls(value: unknown): string[] {
+  return readArray<Record<string, unknown>>(value)
+    .map((call) => String(readObject(call).tool_name || '').trim())
+    .filter(Boolean);
+}
+
+function readTitlesFromHits(value: unknown): string[] {
+  const titles: string[] = [];
+  readArray<Record<string, unknown>>(value).forEach((hit) => {
+    const title = String(readObject(hit).title || '').trim();
+    if (title && !titles.includes(title)) {
+      titles.push(title);
+    }
+  });
+  return titles;
+}
+
+function readAgentObservability(payload: Record<string, unknown>, routeName: string): AgentObservabilityView {
+  const obs = readObject(payload.agent_observability);
+  const routeObs = readObject(obs.route);
+  const toolsObs = readObject(obs.tools);
+  const ragObs = readObject(obs.rag);
+  const llmObs = readObject(obs.llm_routing || payload.llm_routing);
+
+  const route: AgentObservabilityRouteView = {
+    name: String(routeObs.name || routeName || payload.route_name || 'conversation.answer'),
+    computeDomain: String(routeObs.compute_domain || payload.compute_domain || 'none'),
+    intent: String(routeObs.intent || payload.intent || ''),
+    nextStep: String(routeObs.next_step || payload.next_step || ''),
+    selectedTool: String(routeObs.selected_tool || payload.selected_tool || ''),
+    decisionSource: String(routeObs.decision_source || payload.decision_source || ''),
+    confidence: readNumber(routeObs.decision_confidence ?? payload.decision_confidence),
+    reason: String(routeObs.reason || payload.reason || ''),
+  };
+
+  const toolPolicy = readObject(toolsObs.policy || payload.tool_policy);
+  const selectedTools = readStringArray(toolsObs.selected_tools).length
+    ? readStringArray(toolsObs.selected_tools)
+    : readToolNamesFromCalls(toolPolicy.selected_calls);
+  const toolResultsPayload = readArray<Record<string, unknown>>(toolsObs.results).length
+    ? readArray<Record<string, unknown>>(toolsObs.results)
+    : readArray<Record<string, unknown>>(payload.tool_results);
+  const tools: AgentObservabilityToolsView = {
+    needTool: readBoolean(toolsObs.need_tool ?? toolPolicy.need_tool),
+    selectedTools,
+    allowedCount: readArray(toolPolicy.allowed_tools).length,
+    confidence: readNumber(toolPolicy.confidence),
+    source: String(toolPolicy.source || ''),
+    reason: String(toolPolicy.reason || ''),
+    resultCount: readNumber(toolsObs.result_count) ?? toolResultsPayload.length,
+    successCount: readNumber(toolsObs.success_count) ?? toolResultsPayload.filter((item) => readObject(item).success === true).length,
+    failureCount: readNumber(toolsObs.failure_count) ?? toolResultsPayload.filter((item) => readObject(item).success === false).length,
+    results: toolResultsPayload.slice(0, 8).map((item) => {
+      const result = readObject(item);
+      const resultMetadata = readObject(result.metadata);
+      return {
+        toolName: String(result.tool_name || ''),
+        success: readBoolean(result.success),
+        summary: String(result.summary || ''),
+        error: String(result.error || ''),
+        artifactCount: readArray(result.artifacts).length || (readNumber(result.artifact_count) ?? 0),
+        source: String(resultMetadata.source || resultMetadata.transport || ''),
+      };
+    }),
+    skills: readArray<Record<string, unknown>>(readObject(toolsObs.skills || payload.skill_policy).selected_skills)
+      .map((skill) => String(readObject(skill).skill_id || '').trim())
+      .filter(Boolean),
+  };
+
+  const materials = readObject(ragObs.materials || payload.materials_rag);
+  const planning = readObject(materials.planning);
+  const errorDiagnosis = readObject(materials.error_diagnosis);
+  const planningHits = readArray(planning.hits);
+  const errorHits = readArray(errorDiagnosis.hits);
+  const materialTitles = [
+    ...readStringArray(materials.titles),
+    ...readTitlesFromHits(planning.hits),
+    ...readTitlesFromHits(errorDiagnosis.hits),
+  ].filter((title, index, all) => title && all.indexOf(title) === index);
+  const materialsHitCount = readNumber(materials.hit_count) ?? planningHits.length + errorHits.length;
+
+  const thermo = readObject(ragObs.thermo || payload.thermo_lookup || payload.thermo_rag);
+  const thermoTopCandidate = readObject(thermo.top_candidate || readArray<Record<string, unknown>>(thermo.candidates)[0]);
+  const shared = readObject(ragObs.shared_memory || payload.shared_memory);
+  const sharedRetrieval = readObject(shared.retrieval);
+
+  const rag: AgentObservabilityRagView = {
+    materialsAvailable: Boolean(materials.available) || Boolean(Object.keys(materials).length),
+    materialsUsed: Boolean(materials.used) || materialsHitCount > 0,
+    materialsHitCount,
+    materialsPlanningHits: readNumber(materials.planning_hit_count) ?? planningHits.length,
+    materialsErrorHits: readNumber(materials.error_hit_count) ?? errorHits.length,
+    material: String(materials.material || planning.material || errorDiagnosis.material || ''),
+    materialsTitles: materialTitles.slice(0, 8),
+    thermoAvailable: Boolean(thermo.available) || Boolean(Object.keys(thermo).length),
+    thermoMatched: readBoolean(thermo.matched),
+    thermoCandidateCount: readNumber(thermo.candidate_count) ?? readArray(thermo.candidates).length,
+    thermoStrategy: String(thermo.selection_strategy || ''),
+    thermoTopDatabase: String(thermoTopCandidate.database_name || thermoTopCandidate.system_name || ''),
+    sharedAvailable: Boolean(shared.available) || Boolean(Object.keys(shared).length),
+    sharedBackend: String(shared.backend || sharedRetrieval.backend || ''),
+    sharedSelectedCount: readNumber(shared.selected_count) ?? readArray(sharedRetrieval.selected_item_ids).length,
+    sharedWriteCount: readNumber(shared.write_count) ?? 0,
+    sharedConflictCount: readNumber(shared.conflict_count) ?? 0,
+    sharedUnsafeWriteCount: readNumber(shared.unsafe_write_count) ?? 0,
+  };
+
+  const tierCounts = Object.entries(readObject(llmObs.tier_counts)).reduce<Record<string, number>>((acc, [key, value]) => {
+    const numberValue = readNumber(value);
+    if (numberValue !== null) {
+      acc[key] = numberValue;
+    }
+    return acc;
+  }, {});
+  const recentCalls = readArray<Record<string, unknown>>(llmObs.recent_calls).map((item) => {
+    const call = readObject(item);
+    return {
+      tier: String(call.tier || ''),
+      model: String(call.model || readObject(call.route).model || ''),
+      capability: String(call.capability || ''),
+      success: readBoolean(call.success),
+      durationMs: readNumber(call.duration_ms),
+      score: readNumber(call.score),
+      fallbackFrom: String(call.fallback_from || ''),
+      reasons: readStringArray(call.reasons),
+    };
+  });
+  const llm: AgentObservabilityLlmView = {
+    available: Boolean(llmObs.available) || recentCalls.length > 0,
+    totalCalls: readNumber(llmObs.total_calls) ?? recentCalls.length,
+    tierCounts,
+    fallbackCount: readNumber(llmObs.fallback_count) ?? recentCalls.filter((call) => call.fallbackFrom).length,
+    successRate: readNumber(llmObs.success_rate),
+    avgLatencyMs: readNumber(llmObs.avg_latency_ms),
+    recentCalls,
+  };
+
+  const visible = Boolean(
+    route.name ||
+      selectedTools.length ||
+      tools.resultCount ||
+      rag.materialsAvailable ||
+      rag.thermoAvailable ||
+      rag.sharedAvailable ||
+      llm.available,
+  );
+
+  return { visible, route, tools, rag, llm };
 }
 
 function qualityBadgeClasses(tone: 'green' | 'amber' | 'red' | 'slate'): string {
@@ -1058,6 +1300,190 @@ function shouldShowRedBlueAudit(audit: LammpsRedBlueAudit): boolean {
   );
 }
 
+function formatLearnedRouteReason(reason: string): string {
+  const match = reason.match(/^learned_(shadow|guarded):([^:]+):([0-9.]+)/);
+  if (!match) {
+    return reason.replace(/^learned_/, 'MLP ');
+  }
+  const [, mode, tier, confidence] = match;
+  return `MLP ${mode} → ${tier} (${Math.round(Number(confidence) * 100)}%)`;
+}
+
+function AgentObservabilityCard({ view }: { view: AgentObservabilityView }) {
+  if (!view.visible) {
+    return null;
+  }
+
+  const routeChips = [
+    view.route.computeDomain && `domain: ${view.route.computeDomain}`,
+    view.route.nextStep && `next: ${view.route.nextStep}`,
+    view.route.selectedTool && `tool: ${view.route.selectedTool}`,
+    view.route.decisionSource && `source: ${view.route.decisionSource}`,
+    view.route.confidence !== null && `confidence ${Math.round(view.route.confidence * 100)}%`,
+  ].filter(Boolean) as string[];
+  const ragChips = [
+    view.rag.materialsAvailable ? `materials hits ${view.rag.materialsHitCount}` : 'materials RAG idle',
+    view.rag.thermoAvailable ? `thermo candidates ${view.rag.thermoCandidateCount}` : 'thermo RAG idle',
+    view.rag.sharedAvailable ? `memory selected ${view.rag.sharedSelectedCount}` : 'memory idle',
+  ];
+  const latestLlm = view.llm.recentCalls[0];
+  const latestLearnedReason = latestLlm?.reasons.find((reason) => reason.startsWith('learned_')) || '';
+
+  return (
+    <div data-testid="agent-observability-panel" className="rounded-2xl border border-cyan-400/20 bg-slate-950/95 px-4 py-4 text-cyan-50 shadow-inner">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="rounded-xl border border-cyan-200/20 bg-black/20 p-2">
+            <BarChart3 className="h-5 w-5 text-cyan-200" />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-cyan-200/80">Agent Observability</p>
+            <h4 className="mt-1 text-base font-semibold">{view.route.name}</h4>
+            <p className="mt-1 text-sm leading-6 text-cyan-50/85">
+              Route、Tool、RAG/Memory 与 LLM 路由的本轮总览；用于解释 agent 为什么选择这条执行路径。
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2 text-[11px] font-semibold">
+          {routeChips.slice(0, 5).map((chip) => (
+            <span key={chip} className="rounded-full border border-cyan-200/20 bg-black/20 px-3 py-1">
+              {chip}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 xl:grid-cols-4">
+        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-cyan-200" />
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Route</p>
+          </div>
+          <p className="mt-2 text-sm font-semibold">{view.route.intent || view.route.name}</p>
+          <p className="mt-1 line-clamp-3 text-[11px] leading-5 text-cyan-50/70">{view.route.reason || 'No route reason returned.'}</p>
+        </div>
+
+        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
+          <div className="flex items-center gap-2">
+            <Gauge className="h-4 w-4 text-cyan-200" />
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Tool calls</p>
+          </div>
+          <p className="mt-2 text-sm font-semibold">
+            {view.tools.needTool === true ? 'tool path active' : view.tools.needTool === false ? 'no tool required' : 'tool policy unknown'}
+          </p>
+          <p className="mt-1 text-[11px] leading-5 text-cyan-50/70">
+            selected {view.tools.selectedTools.length} · results {view.tools.successCount}/{view.tools.resultCount} · failed {view.tools.failureCount}
+          </p>
+          {view.tools.selectedTools.length ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {view.tools.selectedTools.slice(0, 4).map((tool) => (
+                <span key={tool} className="rounded-full border border-cyan-200/20 bg-black/20 px-2 py-0.5 text-[10px] font-semibold">
+                  {tool}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-[11px] text-cyan-50/55">{view.tools.source || 'policy idle'}</p>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
+          <div className="flex items-center gap-2">
+            <FileText className="h-4 w-4 text-cyan-200" />
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">RAG / Memory</p>
+          </div>
+          <p className="mt-2 text-sm font-semibold">
+            {view.rag.material || view.rag.thermoTopDatabase || view.rag.sharedBackend || 'retrieval summary'}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {ragChips.map((chip) => (
+              <span key={chip} className="rounded-full border border-cyan-200/20 bg-black/20 px-2 py-0.5 text-[10px] font-semibold">
+                {chip}
+              </span>
+            ))}
+          </div>
+          {view.rag.materialsTitles.length ? (
+            <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-cyan-50/65">
+              {view.rag.materialsTitles.slice(0, 3).join(' · ')}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-cyan-200" />
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">LLM routing</p>
+          </div>
+          <p className="mt-2 text-sm font-semibold">
+            {latestLlm ? `${latestLlm.tier || 'tier'} · ${latestLlm.model || 'model'}` : 'no real LLM call observed'}
+          </p>
+          <p className="mt-1 text-[11px] leading-5 text-cyan-50/70">
+            calls {view.llm.totalCalls} · fallback {view.llm.fallbackCount} · success {view.llm.successRate !== null ? formatPercent(view.llm.successRate) : '—'}
+          </p>
+          <p className="mt-1 text-[11px] leading-5 text-cyan-50/60">
+            avg latency {view.llm.avgLatencyMs !== null ? `${formatNumber(view.llm.avgLatencyMs, 0)} ms` : '—'}
+          </p>
+          {latestLearnedReason ? (
+            <p className="mt-1 truncate text-[11px] leading-5 text-cyan-50/60">
+              {formatLearnedRouteReason(latestLearnedReason)}
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {view.tools.results.length || view.llm.recentCalls.length || Object.keys(view.llm.tierCounts).length ? (
+        <div className="mt-3 grid gap-3 xl:grid-cols-3">
+          {view.tools.results.length ? (
+            <div className="rounded-xl border border-cyan-200/10 bg-black/15 px-3 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Recent tool observations</p>
+              <div className="mt-2 space-y-1 text-[11px] leading-5 text-cyan-50/75">
+                {view.tools.results.slice(0, 4).map((result, index) => (
+                  <p key={`${result.toolName}-${index}`} className="truncate">
+                    {result.success === false ? 'failed' : 'ok'} · {result.toolName || 'tool'} · {result.summary || result.error || 'no summary'}
+                  </p>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {view.llm.recentCalls.length ? (
+            <div className="rounded-xl border border-cyan-200/10 bg-black/15 px-3 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Recent LLM decisions</p>
+              <div className="mt-2 space-y-1 text-[11px] leading-5 text-cyan-50/75">
+                {view.llm.recentCalls.slice(0, 4).map((call, index) => (
+                  <p key={`${call.tier}-${call.model}-${index}`} className="truncate">
+                    {call.success === false ? 'failed' : 'ok'} · {call.tier || 'tier'} · {call.capability || 'general'} · {call.durationMs !== null ? `${formatNumber(call.durationMs, 0)} ms` : '—'}
+                    {call.fallbackFrom ? ` · fallback ${call.fallbackFrom}` : ''}
+                  </p>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {Object.keys(view.llm.tierCounts).length || view.tools.skills.length ? (
+            <div className="rounded-xl border border-cyan-200/10 bg-black/15 px-3 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Policy summary</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {Object.entries(view.llm.tierCounts).map(([tier, count]) => (
+                  <span key={tier} className="rounded-full border border-cyan-200/20 bg-black/20 px-2 py-0.5 text-[10px] font-semibold">
+                    {tier}: {count}
+                  </span>
+                ))}
+                {view.tools.skills.slice(0, 4).map((skill) => (
+                  <span key={skill} className="rounded-full border border-indigo-200/20 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-100">
+                    skill {skill}
+                  </span>
+                ))}
+              </div>
+              {view.rag.thermoStrategy ? (
+                <p className="mt-2 text-[11px] leading-5 text-cyan-50/65">thermo strategy: {view.rag.thermoStrategy}</p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ArtifactResultPanel({
   settings,
   runId,
@@ -1077,6 +1503,7 @@ export function ArtifactResultPanel({
   const [selectedArtifactName, setSelectedArtifactName] = useState('');
   const [markdownText, setMarkdownText] = useState('');
   const runPayload = useMemo(() => mergeRunPayload(summary, metadata), [summary, metadata]);
+  const agentObservability = useMemo(() => readAgentObservability(runPayload, routeName), [routeName, runPayload]);
   const metrics = summary.metrics && typeof summary.metrics === 'object' ? summary.metrics as Record<string, unknown> : {};
   const resultProfile = runPayload.result_profile && typeof runPayload.result_profile === 'object' ? runPayload.result_profile as ResultProfile : null;
   const physicalQuality = useMemo(() => readPhysicalQuality(runPayload), [runPayload]);
@@ -1231,7 +1658,8 @@ export function ArtifactResultPanel({
   // Phase Diagram Display styled with user's Tailwind design
   if (routeName === 'phase_diagram.generate' || routeName === 'mixed.request' || htmlContent) {
     return (
-      <div className="w-full max-w-[min(1820px,100%)] my-4">
+      <div className="w-full max-w-[min(1820px,100%)] my-4 space-y-3">
+        <AgentObservabilityCard view={agentObservability} />
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           {htmlContent ? (
             <iframe
@@ -1306,6 +1734,10 @@ export function ArtifactResultPanel({
             </button>
             <span className="text-emerald-500/80 px-2 py-0.5 bg-emerald-500/10 rounded ml-2">DATA: MAPPED</span>
           </div>
+        </div>
+
+        <div className="px-4 pt-4">
+          <AgentObservabilityCard view={agentObservability} />
         </div>
 
         <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,2.35fr)_340px]">
