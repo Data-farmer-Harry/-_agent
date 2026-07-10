@@ -386,6 +386,44 @@ npm run build
 
 配置文件优先级是进程环境变量、中央 JSON、旧 `.env` 回退、代码默认值。中央 JSON 位于 `backend/configs/llm_config.json`。公开 API 和前端诊断只返回 key 是否存在与掩码值，不返回明文 key。
 
+LLM 调用现在带有一层可选的动态路由。业务 agent 仍然正常调用 `chat_text`、`chat_json` 或多模态接口，`LLMClient` 会根据 prompt 长度、结构化输出要求、LAMMPS/代码修复/审查、RAG/文献、视觉识别等信号，自动选择 `fast`、`balanced`、`strong` 或 `vision` 档位。没有额外配置时，所有档位都会继承 `backend/configs/llm_config.json` 里的当前模型，所以原功能不变。
+
+如果要启用多模型分流，复制样例文件：
+
+```bash
+cp backend/configs/llm_routing.example.json backend/configs/llm_routing.json
+```
+
+然后按需修改各档位的 `api_base_url`、`model`、`timeout_seconds` 和 `max_tokens`。`backend/configs/llm_routing.json` 已被 `.gitignore` 忽略，不会上传；真实 API key 仍放在 `backend/.env`、`backend/configs/.env`、进程环境变量或密钥管理器中。常见用法是：
+
+| 档位 | 典型任务 |
+| --- | --- |
+| `fast` | 短问答、记忆压缩、prompt 推荐。 |
+| `balanced` | Supervisor 路由、query rewrite、RAG/文献上下文整理。 |
+| `strong` | LAMMPS 请求解析、代码生成、修复、Red/Blue 审查、评测判断。 |
+| `vision` | 相图截图识别、多模态图像解析。 |
+
+当某一档 provider 调用失败时，路由层可以按 `fallbacks` 自动升级，例如 `fast → balanced → strong`。如果 fallback 档位最终解析出的模型和 provider 与原档位相同，则不会重复发送同一个请求。
+
+如果要训练一个小型神经网络做动态路由推荐，可以运行：
+
+```bash
+conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py
+```
+
+训练脚本会构造 hard synthetic route dataset，包含 clean、mixed、adversarial、long_noise 四类难度样本，例如 LAMMPS 概念解释与 LAMMPS 修复的区分、RAG 检索代码文档与代码修复的区分、文字里出现 image 但没有上传图像、真实多模态图像识别等边界情况。脚本会训练一个单隐藏层 MLP，并把本地产物写到 `backend/outputs/llm_route_mlp/`：
+
+| 文件 | 作用 |
+| --- | --- |
+| `model.json` | 可被路由层加载的小型 MLP 权重。 |
+| `metrics.json` | train/test accuracy、precision、recall、F1、confusion matrix、log loss 等指标。 |
+| `report.md` | 人类可读的训练报告。 |
+| `train.jsonl` / `test.jsonl` / `probe.jsonl` | 本次构造出的合成训练、测试和手写探针样本。 |
+
+当前默认训练规模约 3266 条样本，其中 mixed/adversarial/long_noise 超过一半；本地最近一次训练的 holdout test macro-F1 约 0.9958，probe set macro-F1 为 1.0000。这个结果仍然只是 synthetic baseline，适合冷启动；后续应逐步用真实调用 telemetry 替换或混合训练。
+
+在 `backend/configs/llm_routing.json` 中设置 `learned_policy.enabled=true` 后，神经网络有两种使用方式：`shadow` 只记录推荐、不改变最终路由；`guarded` 会在置信度超过阈值后接管，但仍受 `capability_min_tiers` 保护，例如 LAMMPS 修复、审查、judge 不会被降级到低风险档位。
+
 ## 18. 常用 Makefile 命令
 
 | 命令 | 用途 |

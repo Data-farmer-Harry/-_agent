@@ -1,0 +1,84 @@
+{
+  "enabled": true,
+  "fast_max_score": 34,
+  "balanced_max_score": 69,
+  "fallback_on_error": true,
+  "max_escalations": 1,
+  "routes": {
+    "fast": {
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
+      "model": "your-fast-chat-model",
+      "timeout_seconds": 45,
+      "max_tokens": 1800,
+      "temperature": 0.1
+    },
+    "balanced": {
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
+      "model": "your-balanced-chat-model",
+      "timeout_seconds": 90,
+      "max_tokens": 3500,
+      "temperature": 0.1
+    },
+    "strong": {
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
+      "model": "your-strong-reasoning-model",
+      "timeout_seconds": 150,
+      "max_tokens": 5000,
+      "temperature": 0.1
+    },
+    "vision": {
+      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
+      "model": "your-vision-model",
+      "timeout_seconds": 150,
+      "max_tokens": 4000,
+      "temperature": 0.1
+    }
+  },
+  "fallbacks": {
+    "fast": "balanced",
+    "balanced": "strong",
+    "strong": "",
+    "vision": "strong"
+  },
+  "learned_policy": {
+    "enabled": false,
+    "mode": "shadow",
+    "model_path": "backend/outputs/llm_route_mlp/model.json",
+    "confidence_threshold": 0.62,
+    "allow_downgrade": false,
+    "notes": [
+      "Run `conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py` to train a local tiny MLP model.",
+      "`shadow` records the neural recommendation but keeps the rule router decision.",
+      "`guarded` lets the MLP override only after confidence_threshold and safety clamps. High-risk capabilities still obey capability_min_tiers."
+    ]
+  },
+  "capability_min_tiers": {
+    "memory": "fast",
+    "prompt": "fast",
+    "query": "balanced",
+    "rewrite": "balanced",
+    "rag": "balanced",
+    "literature": "balanced",
+    "supervisor": "balanced",
+    "phase": "strong",
+    "thermo": "strong",
+    "codegen": "strong",
+    "repair": "strong",
+    "review": "strong",
+    "judge": "strong",
+    "lammps": "strong",
+    "vision": "vision",
+    "recognition": "vision",
+    "multimodal": "vision"
+  },
+  "notes": [
+    "Copy this file to backend/configs/llm_routing.json to enable local overrides.",
+    "Do not place real API keys in this JSON. Keep keys in backend/.env, backend/configs/.env, process env, or your secret manager.",
+    "Replace the placeholder model names with model ids supported by your provider, for example OpenRouter model ids.",
+    "When this file is absent, all tiers safely inherit backend/configs/llm_config.json and the current PHASE_DIAGRAM_LLM_* settings."
+  ]
+}

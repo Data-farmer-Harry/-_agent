@@ -450,6 +450,8 @@ def update_runtime_llm_config(payload: Mapping[str, object]) -> Settings:
 
 
 def llm_config_public_payload() -> dict[str, object]:
+    from app.core.llm_routing import llm_routing_public_payload
+
     masked_key = ""
     if settings.llm_api_key:
         masked_key = f"{settings.llm_api_key[:4]}...{settings.llm_api_key[-4:]}" if len(settings.llm_api_key) > 8 else "***set***"
@@ -524,4 +526,5 @@ def llm_config_public_payload() -> dict[str, object]:
         "rag_vector_store_path": settings.rag_vector_store_path,
         "api_key_set": bool(settings.llm_api_key),
         "api_key_masked": masked_key,
+        "llm_routing": llm_routing_public_payload(),
     }
