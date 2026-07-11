@@ -33,6 +33,7 @@ SUPPORTED_DOMAINS = {
     "red_blue_repair",
     "orchestration_recovery",
     "shared_memory",
+    "trajectory_evaluation",
     "recognition",
     "mcp_tooling",
     "final_response",

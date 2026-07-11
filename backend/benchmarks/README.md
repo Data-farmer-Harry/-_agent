@@ -219,6 +219,20 @@ DashScope compatible-mode 同理使用 `MATERIALS_JUDGE_PROVIDER=dashscope`、`D
 - `backend/benchmarks/datasets/judge_calibration_cases.jsonl`
 - `backend/benchmarks/datasets/mcp_cases.jsonl`
 
+额外的 500+ 综合 Agent benchmark 位于：
+
+- `backend/benchmarks/datasets/matterlab_agent_bench_500/manifest.json`
+- `backend/benchmarks/datasets/matterlab_agent_bench_500/development/cases.jsonl`
+- `backend/benchmarks/datasets/matterlab_agent_bench_500/frozen_test/cases.jsonl`
+
+它由 `backend/benchmarks/build_matterlab_agent_bench_500.py` 生成，复用现有 MaterialsAgentBench 的 390 条 case，并补充 130 条覆盖 LAMMPS 规划、轨迹测评、RAG 多跳、Tool/MCP、共享记忆、DAG 恢复、最终回答、相图 registry 和动态 LLM 路由的 Agent 专项 case。设计说明见 `docs/MATTERLAB_BENCHMARK_500.md`。
+
+可通过统一 runner 运行它的 deterministic schema/rule-layer 质量门：
+
+```bash
+cd backend && conda run -n lammps_agent python benchmarks/run_benchmarks.py run --suite matterlab_agent_bench_500
+```
+
 外部论文图资产位于：
 
 - `backend/benchmarks/assets/external_phase_diagrams/`

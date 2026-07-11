@@ -64,13 +64,16 @@ from benchmarks.benchmark_config import (
     LIVE_SUITES,
 )
 from benchmarks.build_datasets import build_manifest
+from benchmarks.build_matterlab_agent_bench_500 import build_matterlab_agent_bench_cases
 from benchmarks.dataset_io import load_datasets, resolve_backend_path as _resolve_backend_path, validate_datasets
 from benchmarks.evaluators import (
+    RuleEvaluationObservation,
     build_judge_backend_matrix,
     build_judge_drift_report,
     evaluate_judge_calibration_case,
     evaluate_judge_with_provider,
     evaluate_materials_multihop,
+    evaluate_rule_layer,
     judge_provider_config_from_env,
     sanitized_provider_metadata,
 )
@@ -471,6 +474,12 @@ def _suite_metric_summary(suite: str, result: dict[str, Any], *, elapsed_seconds
         metrics["tool_contract_pass_rate"] = pass_rate
     elif suite == "recognition":
         metrics["recognition_contract_pass_rate"] = pass_rate
+    elif suite == "matterlab_agent_bench_500":
+        metrics["rule_layer_pass_rate"] = pass_rate
+        if cases:
+            metrics["augmented_case_rate"] = round(float(result.get("augmented_cases") or 0) / cases, 4)
+            metrics["frozen_case_rate"] = round(float(result.get("frozen_cases") or 0) / cases, 4)
+            metrics["trajectory_case_rate"] = round(float(result.get("trajectory_cases") or 0) / cases, 4)
     return metrics
 
 
@@ -2020,6 +2029,83 @@ def run_mcp_benchmark(cases: list[dict[str, Any]], *, limit: int | None = None) 
     return {"suite": "mcp", "cases": len(results), "passed": sum(1 for item in results if item["passed"]), "results": results}
 
 
+def run_matterlab_agent_bench_500(*, limit: int | None = None) -> dict[str, Any]:
+    cases = build_matterlab_agent_bench_cases()
+    selected = cases[:limit] if limit else cases
+    results: list[dict[str, Any]] = []
+    domain_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    frozen_cases = 0
+    augmented_cases = 0
+    trajectory_cases = 0
+    for case in selected:
+        domain_counts[case.domain] = domain_counts.get(case.domain, 0) + 1
+        source_counts[case.source_dataset] = source_counts.get(case.source_dataset, 0) + 1
+        if case.split == "frozen_test":
+            frozen_cases += 1
+        if case.metadata.get("generation", {}).get("kind") == "matterlab_bench_500_augmented":
+            augmented_cases += 1
+        if case.source_dataset == "matterlab_trajectory_cases" or case.domain == "trajectory_evaluation":
+            trajectory_cases += 1
+        evaluation = evaluate_rule_layer(case, _contract_observation_for_case(case))
+        results.append(
+            {
+                "case_id": case.case_id,
+                "passed": evaluation.passed,
+                "domain": case.domain,
+                "source_dataset": case.source_dataset,
+                "split": case.split,
+                "details": {
+                    "hard_gate_passed": evaluation.hard_gate_passed,
+                    "critical_failures": evaluation.critical_failures,
+                    "metrics": {name: metric.to_dict() for name, metric in evaluation.metrics.items()},
+                },
+            }
+        )
+    return {
+        "suite": "matterlab_agent_bench_500",
+        "cases": len(results),
+        "passed": sum(1 for item in results if item["passed"]),
+        "results": results,
+        "domain_counts": dict(sorted(domain_counts.items())),
+        "source_counts": dict(sorted(source_counts.items())),
+        "frozen_cases": frozen_cases,
+        "augmented_cases": augmented_cases,
+        "trajectory_cases": trajectory_cases,
+    }
+
+
+def _contract_observation_for_case(case) -> RuleEvaluationObservation:  # noqa: ANN001
+    required_hops = case.metadata.get("required_hops")
+    if not isinstance(required_hops, list):
+        required_hops = []
+    claims: list[dict[str, Any]] = []
+    for gold in case.claim_gold:
+        claim_id = str(gold.get("claim_id") or gold.get("id") or gold.get("claim") or gold.get("text"))
+        claims.append(
+            {
+                "claim_id": claim_id,
+                "text": str(gold.get("claim") or gold.get("text") or claim_id),
+                "status": "supported",
+                "critical": bool(gold.get("critical", False)),
+            }
+        )
+    citations = [{"evidence_id": evidence_id, "supports": True} for evidence_id in case.required_evidence]
+    return RuleEvaluationObservation(
+        route_name=case.expected_route,
+        compute_domain=case.expected_compute_domain,
+        locked_constraints=case.locked_constraints,
+        completed_tools=case.required_tool_chain,
+        artifacts=case.required_artifacts,
+        provenance={"actual": "contract", "claimed": "contract"},
+        final_response="Deterministic contract observation: evidence, limitations, and provenance are explicitly preserved.",
+        claims=claims,
+        citations=citations,
+        required_hops=[{**hop, "completed": True} for hop in required_hops if isinstance(hop, dict)],
+        metadata={"contract_observation": True},
+    )
+
+
 def print_summary(datasets: dict[str, list[dict[str, Any]]]) -> None:
     summary = build_manifest(datasets)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -2066,6 +2152,7 @@ def run_suite(
         "context_compression": lambda: run_context_compression_benchmark(datasets["context_compression_cases"], limit=limit),
         "materials_multihop": lambda: run_materials_multihop_benchmark(datasets["materials_multihop_cases"], limit=limit),
         "mcp": lambda: run_mcp_benchmark(datasets["mcp_cases"], limit=limit),
+        "matterlab_agent_bench_500": lambda: run_matterlab_agent_bench_500(limit=limit),
         "rag_recall": lambda: run_rag_recall(top_k=5, limit=limit),
     }
     with ExitStack() as stack:

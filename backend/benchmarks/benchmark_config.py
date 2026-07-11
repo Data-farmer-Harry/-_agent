@@ -28,6 +28,7 @@ DETERMINISTIC_SUITES = (
     "context_compression",
     "materials_multihop",
     "mcp",
+    "matterlab_agent_bench_500",
 )
 LIVE_SUITES = ("external_recognition_live",)
 
@@ -89,4 +90,5 @@ BENCHMARK_THRESHOLDS = {
     "materials_multihop.citation_order_authority_rate": 1.00,
     "materials_multihop.missing_hop_honesty_rate": 1.00,
     "mcp.tool_contract_pass_rate": 0.90,
+    "matterlab_agent_bench_500.success_rate": 1.00,
 }
