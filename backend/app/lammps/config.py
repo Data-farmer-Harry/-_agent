@@ -106,6 +106,7 @@ class LammpsConfig:
     max_retries: int = int(os.getenv("MAX_RUN_RETRIES", "1"))
     lammps_preflight_dag_enabled: bool = _env_bool("LAMMPS_PREFLIGHT_DAG_ENABLED", False)
     lammps_red_blue_review_enabled: bool = _env_bool("LAMMPS_RED_BLUE_REVIEW_ENABLED", True)
+    lammps_multifidelity_enabled: bool = _env_bool("LAMMPS_MULTIFIDELITY_ENABLED", False)
 
 
 _RUNTIME_OVERRIDES: dict[str, Any] = {}
@@ -124,11 +125,12 @@ def load_lammps_config() -> LammpsConfig:
         "max_retries",
         "lammps_preflight_dag_enabled",
         "lammps_red_blue_review_enabled",
+        "lammps_multifidelity_enabled",
     ):
         value = persisted.get(key)
         if value is None or value == "":
             continue
-        if key in {"allow_mock_fallback", "force_mock", "lammps_preflight_dag_enabled", "lammps_red_blue_review_enabled"}:
+        if key in {"allow_mock_fallback", "force_mock", "lammps_preflight_dag_enabled", "lammps_red_blue_review_enabled", "lammps_multifidelity_enabled"}:
             base[key] = _coerce_bool(value)
         elif key == "max_retries":
             base[key] = int(value)
@@ -149,13 +151,14 @@ def update_runtime_lammps_config(payload: dict[str, Any]) -> LammpsConfig:
         "max_retries",
         "lammps_preflight_dag_enabled",
         "lammps_red_blue_review_enabled",
+        "lammps_multifidelity_enabled",
     }
     persist_patch: dict[str, Any] = {}
     with _LOCK:
         for key, value in payload.items():
             if key not in allowed or value is None:
                 continue
-            if key in {"allow_mock_fallback", "force_mock", "lammps_preflight_dag_enabled", "lammps_red_blue_review_enabled"}:
+            if key in {"allow_mock_fallback", "force_mock", "lammps_preflight_dag_enabled", "lammps_red_blue_review_enabled", "lammps_multifidelity_enabled"}:
                 normalized = _coerce_bool(value)
                 _RUNTIME_OVERRIDES[key] = normalized
                 persist_patch[key] = normalized
@@ -184,6 +187,7 @@ def lammps_config_public_payload() -> dict[str, Any]:
         "max_retries": config.max_retries,
         "lammps_preflight_dag_enabled": config.lammps_preflight_dag_enabled,
         "lammps_red_blue_review_enabled": config.lammps_red_blue_review_enabled,
+        "lammps_multifidelity_enabled": config.lammps_multifidelity_enabled,
         "lammps_command_exists": bool(config.lammps_command and Path(config.lammps_command).exists()),
         "potentials_dir_exists": bool(config.potentials_dir and Path(config.potentials_dir).exists()),
         "ovito_available": ovito_status["ovito_available"],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -121,10 +122,24 @@ def generate_lammps_input(
     output_dir: Path,
     potentials_dir: str = "",
 ) -> Path:
-    config = build_lammps_template_config(request, potentials_dir=potentials_dir)
+    # LLM output is first lowered to a typed, unit-aware IR. Only the symbolic
+    # compiler may feed the text template, keeping generation deterministic.
+    from app.lammps.ir import compile_ir, request_to_ir
+
+    ir = request_to_ir(dict(request))
+    compiled_request = compile_ir(ir)
+    config = build_lammps_template_config(compiled_request, potentials_dir=potentials_dir)
     script = LammpsTemplateProcessor().render(config)
     path = output_dir / str(config["script_name"])
     path.write_text(script, encoding="utf-8")
+    (output_dir / "lammps_ir.json").write_text(
+        json.dumps(ir.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / "lammps_ir_validation.json").write_text(
+        json.dumps(compiled_request["ir_validation"], ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return path
 
 

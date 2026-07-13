@@ -77,6 +77,7 @@ CONFIG_KEY_MAP = {
     "max_retries": "MAX_RUN_RETRIES",
     "lammps_preflight_dag_enabled": "LAMMPS_PREFLIGHT_DAG_ENABLED",
     "lammps_red_blue_review_enabled": "LAMMPS_RED_BLUE_REVIEW_ENABLED",
+    "lammps_multifidelity_enabled": "LAMMPS_MULTIFIDELITY_ENABLED",
 }
 SECRET_CONFIG_KEYS = {
     "llm_api_key",
@@ -250,7 +251,7 @@ class Settings(BaseModel):
     rag_reranker_api_key: str = ""
     rag_reranker_model: str = "cohere/rerank-v3.5"
     rag_reranker_candidate_pool: int = 20
-    rag_reranker_timeout_seconds: int = 60
+    rag_reranker_timeout_seconds: int = 8
     rag_vector_store_path: str = ""
     artifact_retention_keep_latest: int = 120
     artifact_retention_max_age_days: int = 30
@@ -338,7 +339,7 @@ def build_settings(
         rag_reranker_api_key=merged_env.get("PHASE_DIAGRAM_RAG_RERANKER_API_KEY", ""),
         rag_reranker_model=merged_env.get("PHASE_DIAGRAM_RAG_RERANKER_MODEL", "cohere/rerank-v3.5"),
         rag_reranker_candidate_pool=int(merged_env.get("PHASE_DIAGRAM_RAG_RERANKER_CANDIDATE_POOL", "20")),
-        rag_reranker_timeout_seconds=int(merged_env.get("PHASE_DIAGRAM_RAG_RERANKER_TIMEOUT_SECONDS", "60")),
+        rag_reranker_timeout_seconds=int(merged_env.get("PHASE_DIAGRAM_RAG_RERANKER_TIMEOUT_SECONDS", "8")),
         rag_vector_store_path=merged_env.get("PHASE_DIAGRAM_RAG_VECTOR_STORE_PATH", ""),
         artifact_retention_keep_latest=int(merged_env.get("PHASE_DIAGRAM_ARTIFACT_RETENTION_KEEP_LATEST", "120")),
         artifact_retention_max_age_days=int(merged_env.get("PHASE_DIAGRAM_ARTIFACT_RETENTION_MAX_AGE_DAYS", "30")),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.materials_rag.context_builder import build_materials_rag_context
 from app.materials_rag.models import MaterialsRagCandidate, MaterialsRagHit, MaterialsRagQuery, MaterialsRagSearchResponse
 from app.materials_rag.retriever import search_materials_rag
+from app.rag.uncertainty import estimate_retrieval_uncertainty
 
 
 class MaterialsRagService:
@@ -66,6 +67,9 @@ class MaterialsRagService:
                     rerank_score=hit.rerank_score,
                     reranker_backend=hit.reranker_backend,
                     original_rank=hit.original_rank,
+                    graph_score=hit.graph_score,
+                    graph_paths=hit.graph_paths,
+                    graph_community=hit.graph_community,
                     matched_fields=hit.matched_fields,
                     source=hit.document.source,
                     source_url=hit.document.source_url,
@@ -80,4 +84,10 @@ class MaterialsRagService:
                 "It can improve explanation, workflow suggestions, and LAMMPS error diagnosis, but it does not override registry checks, schema validation, or the real execution runtime."
             ),
         )
-        return response.model_dump(mode="json")
+        payload = response.model_dump(mode="json")
+        payload["retrieval_uncertainty"] = estimate_retrieval_uncertainty(hits).public_payload()
+        payload["retrieval_policy"] = {
+            "strategy": "hybrid_bm25_dense_rerank_graphrag_with_calibrated_abstention",
+            "action": payload["retrieval_uncertainty"]["action"],
+        }
+        return payload

@@ -3,12 +3,14 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
+from time import perf_counter
 
 from app.config import settings
 from app.core.artifacts import ArtifactService
 from app.core.llm import LLMClient, LLMRequiredError
 from app.materials_rag.normalizer import extract_materials, infer_domain_hint, normalize_material
 from app.materials_rag.service import MaterialsRagService
+from app.materials_rag.context_builder import build_materials_rag_context
 from app.recognition_reconstruction.service import RecognitionReconstructionService
 from app.state import (
     AgentGraphState,
@@ -56,6 +58,23 @@ class ChatAgent:
         r"马氏体|奥氏体|铁素体|渗碳体|珠光体|贝氏体|细晶强化|米勒指数|"
         r"xrd|ebsd|eds|edx|dsc|物相鉴定|金相|纳米压痕|形状记忆合金|金属玻璃|腐蚀|"
         r"蠕变|调幅分解|旋节分解|加工-结构-性能-服役)",
+        flags=re.IGNORECASE,
+    )
+    EXPLICIT_RAG_PATTERN = re.compile(
+        r"(知识库|知识增强|检索|查资料|依据|引用|来源|文献|参考资料|reference|citation|grounded|rag)",
+        flags=re.IGNORECASE,
+    )
+    HIGH_VALUE_RAG_PATTERN = re.compile(
+        r"(fix\s+nvt|fix\s+npt|fix\s+nph|pair_style|pair\s+coeff|thermo_style|stress/atom|centro/atom|"
+        r"cna/atom|voronoi/atom|lost atoms|non-numeric pressure|out of range atoms|bond atoms missing|"
+        r"illegal command|shake atoms missing|lammps\s*报错|报错怎么办|error\b|eam|openkim|meam|tersoff|"
+        r"reaxff|buckingham|mliap|势函数|potential|materials project|jarvis|aflow|matminer|"
+        r"formation energy|energy above hull|band gap|bandgap|晶体结构|晶格常数|形成能|凸包|带隙)",
+        flags=re.IGNORECASE,
+    )
+    COMPLEX_RAG_PATTERN = re.compile(
+        r"(为什么|为何|如何|机制|机理|影响|比较|评估|验证|选择|适合|偏差|稳定性|训练域|"
+        r"耦合|失效|根因|诊断|是否意味着|how|why|mechanism|compare|validate|diagnos)",
         flags=re.IGNORECASE,
     )
 
@@ -608,7 +627,28 @@ class ChatAgent:
             "你可以直接这样说：`请用 LAMMPS 做 Cu heating，800K，4000 steps，NVT，EAM 势函数。`"
         )
 
+    @staticmethod
+    def _build_supervisor_clarification_answer(state: AgentGraphState) -> str | None:
+        decision = state.get("supervisor_decision") or {}
+        intent = str(decision.get("intent") or "")
+        if intent == "clarify_phase_request":
+            return (
+                "可以生成相图，但还缺少材料体系。请告诉我是哪个二元或三元体系，"
+                "例如 `Al-Zn 二元相图`；如果你有指定温度范围，也可以一起给我。"
+            )
+        if intent == "clarify_image_request":
+            return "这条任务需要读取原图，但当前对话里没有可用图片。请上传相图或截图后再发送识别要求。"
+        if intent == "clarify_ambiguous_request":
+            return (
+                "这条请求同时包含了不同执行方向，我暂时不能安全确定路线。"
+                "请明确你要的是：LAMMPS 模拟、新生成相图，还是识别一张已上传的相图。"
+            )
+        return None
+
     def _build_contextual_answer(self, state: AgentGraphState) -> str | None:
+        clarification = self._build_supervisor_clarification_answer(state)
+        if clarification is not None:
+            return clarification
         clarification = self._build_lammps_clarification_answer(state)
         if clarification is not None:
             return clarification
@@ -632,16 +672,48 @@ class ChatAgent:
         return None
 
     @classmethod
-    def _should_use_materials_rag(cls, state: AgentGraphState, contextual_answer: str | None) -> bool:
+    def _materials_rag_gate(cls, state: AgentGraphState, contextual_answer: str | None) -> dict[str, object]:
+        """Decide whether retrieval is worth paying for on this turn.
+
+        RAG is an on-demand grounding tool, not a mandatory ChatAgent stage.
+        Cheap definitions, greetings, project questions, and grounded follow-ups
+        stay on the direct LLM path. Retrieval is reserved for explicit source
+        requests, high-value technical lookups, and complex specialist queries.
+        """
+
         message = state["request"].message
-        if cls.MATERIALS_RAG_PATTERN.search(message):
-            return True
-        if contextual_answer and (cls.MATERIALS_RAG_PATTERN.search(contextual_answer) or cls.LAMMPS_PATTERN.search(contextual_answer)):
-            return True
-        last_run_context = state.get("last_run_context")
-        if last_run_context and last_run_context.route_name == "lammps.generate" and cls.LAMMPS_PATTERN.search(message):
-            return True
-        return False
+        route = state.get("route")
+        intent = route.intent if route is not None else ""
+        domain = infer_domain_hint(message)
+        is_materials_query = bool(domain or cls.MATERIALS_RAG_PATTERN.search(message))
+        explicit_grounding = bool(cls.EXPLICIT_RAG_PATTERN.search(message))
+
+        if contextual_answer is not None and not (explicit_grounding and is_materials_query):
+            return {"use": False, "reason": "contextual_follow_up", "domain_hint": domain}
+        if intent in {
+            "clarify_lammps_request",
+            "clarify_phase_request",
+            "clarify_image_request",
+            "clarify_ambiguous_request",
+            "follow_up_about_previous_run",
+            "rehydrate_previous_phase_html",
+        } and not explicit_grounding:
+            return {"use": False, "reason": "route_does_not_need_retrieval", "domain_hint": domain}
+        if explicit_grounding and is_materials_query:
+            return {"use": True, "reason": "explicit_grounding_request", "domain_hint": domain}
+        if cls.HIGH_VALUE_RAG_PATTERN.search(message):
+            return {"use": True, "reason": "specialist_lookup", "domain_hint": domain}
+        if (
+            is_materials_query
+            and len(message.strip()) >= 18
+            and cls.COMPLEX_RAG_PATTERN.search(message)
+        ):
+            return {"use": True, "reason": "complex_specialist_question", "domain_hint": domain}
+        return {"use": False, "reason": "direct_answer_sufficient", "domain_hint": domain}
+
+    @classmethod
+    def _should_use_materials_rag(cls, state: AgentGraphState, contextual_answer: str | None) -> bool:
+        return bool(cls._materials_rag_gate(state, contextual_answer)["use"])
 
     @classmethod
     def _infer_materials_rag_filters(cls, state: AgentGraphState) -> dict[str, str | None]:
@@ -740,8 +812,19 @@ class ChatAgent:
         return {"domain": domain, "doc_type": doc_type, "material": material}
 
     def _resolve_materials_rag(self, state: AgentGraphState, contextual_answer: str | None) -> dict[str, object]:
-        if not self._should_use_materials_rag(state, contextual_answer):
-            return {"hits": [], "context": "", "domain": None, "doc_type": None, "material": None}
+        started_at = perf_counter()
+        gate = self._materials_rag_gate(state, contextual_answer)
+        if not gate["use"]:
+            return {
+                "hits": [],
+                "context": "",
+                "domain": None,
+                "doc_type": None,
+                "material": None,
+                "duration_ms": 0.0,
+                "gate_reason": gate["reason"],
+                "requested": False,
+            }
 
         filters = self._infer_materials_rag_filters(state)
         hits = self.materials_rag_service.search(
@@ -751,12 +834,11 @@ class ChatAgent:
             material=filters["material"],
             top_k=4,
         )
-        context = self.materials_rag_service.build_context(
-            state["request"].message,
-            domain=filters["domain"],
-            doc_type=filters["doc_type"],
-            material=filters["material"],
-            top_k=4,
+        # Reuse the same retrieval result. build_context() performs a search of
+        # its own and previously doubled query embedding/reranker calls.
+        context = build_materials_rag_context(
+            query=state["request"].message,
+            hits=hits,
             max_items=3,
         )
         return {
@@ -766,6 +848,9 @@ class ChatAgent:
             "doc_type": filters["doc_type"],
             "material": filters["material"],
             "evidence_hits": [hit.model_dump(mode="json") for hit in hits],
+            "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            "gate_reason": gate["reason"],
+            "requested": True,
         }
 
     @staticmethod
@@ -967,7 +1052,31 @@ class ChatAgent:
         contextual_answer = self._build_contextual_answer(state)
         materials_rag_payload = self._resolve_materials_rag(state, contextual_answer)
         materials_rag_context = str(materials_rag_payload.get("context") or "")
-        if not self.llm_client.is_configured():
+        supervisor_intent = str((state.get("supervisor_decision") or {}).get("intent") or "")
+        deterministic_clarification = supervisor_intent in {
+            "clarify_lammps_request",
+            "clarify_phase_request",
+            "clarify_image_request",
+            "clarify_ambiguous_request",
+        }
+        last_run_context = state.get("last_run_context")
+        shared_memory_context = state.get("shared_memory_context") if isinstance(state.get("shared_memory_context"), dict) else {}
+        skill_decision = state.get("skill_decision") if isinstance(state.get("skill_decision"), dict) else {}
+        has_selected_skill = bool(skill_decision.get("selected_skills"))
+        lean_direct_chat = bool(
+            not materials_rag_context
+            and contextual_answer is None
+            and not state.get("tool_results")
+            and not has_selected_skill
+            and state.get("recognition_result") is None
+            and not (last_run_context and last_run_context.run_id)
+            and not shared_memory_context.get("forced_retention_ids")
+        )
+        chat_prompt_mode = "deterministic_clarification" if deterministic_clarification else "full_context"
+        chat_max_tokens = 0 if deterministic_clarification else 1200
+        if deterministic_clarification and contextual_answer is not None:
+            answer = contextual_answer
+        elif not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
                 self.llm_client.require_configured(agent_name="ChatAgent", capability="对话回答与 follow-up 解释")
             answer = self._build_materials_rag_fallback_answer(
@@ -976,37 +1085,60 @@ class ChatAgent:
                 rag_payload=materials_rag_payload,
             ) or self._build_fallback_answer(state, contextual_answer)
         else:
+            if lean_direct_chat:
+                chat_prompt_mode = "lean_direct"
+                chat_max_tokens = 800
+                system_prompt = (
+                    "You are the ChatAgent for a materials research system. "
+                    "Answer the current user directly, clearly, and concisely in Chinese. "
+                    "Do not invent browsing, tool execution, database access, or experimental results that are not present. "
+                    "Do not describe yourself as a generic internet-enabled assistant; stay grounded in this materials research agent. "
+                    "For scientific uncertainty, state the boundary instead of guessing."
+                )
+                user_prompt = (
+                    f"User message:\n{request.message}\n\n"
+                    f"Conversation summary:\n{state.get('current_context_summary', '')}\n\n"
+                    f"Relevant memory:\n{json.dumps(state.get('long_term_memory_hits', [])[:3], ensure_ascii=False)}\n\n"
+                    f"Recent history:\n{json.dumps([turn.model_dump(mode='json') for turn in state.get('messages', [])[-8:]], ensure_ascii=False)}"
+                )
+            else:
+                chat_prompt_mode = "rag_grounded" if materials_rag_context else "full_context"
+                chat_max_tokens = 600 if materials_rag_context else 1200
+                system_prompt = (
+                    "You are the ChatAgent for a materials research system. "
+                    "Answer clearly in Chinese. "
+                    "You must use the provided last_run_context, recognition_result, and contextual grounding when relevant. "
+                    "Treat shared memory locked facts as explicit user or execution constraints; do not silently override them. "
+                    "When materials RAG context is provided, use it as grounded background knowledge and prefer it over unsupported free-form speculation. "
+                    "For a RAG-grounded technical answer, synthesize a compact complete checklist with the diagnosis order, 3-5 key checks, source titles, and the next information needed. Keep the complete answer within 500 Chinese characters unless the user explicitly requests a long report; omit long introductions and repeated explanations. "
+                    "If the user asks about the previous run, answer from that context instead of pretending nothing happened. "
+                    "Do not claim tool execution that did not happen in this turn. "
+                    "Do not invent browsing,联网,数据库访问,外部检索,插件调用, or hidden system capabilities unless they are explicitly present in the supplied context for this turn or are part of the configured system capabilities. "
+                    "If future web research capability is supported, only describe it as available when it is actually configured or invoked; otherwise answer conservatively. "
+                    "Do not describe yourself as a generic internet-enabled assistant by default; stay grounded in this materials research agent project and the currently active tools. "
+                    "Do not speculate about model provider, model family, or deployment identity unless the user is explicitly asking and the answer is present in the provided context. "
+                    "If capability boundaries are unclear, answer conservatively and focus on what the current run, artifacts, and memory actually show."
+                )
+                user_prompt = (
+                    f"User message:\n{request.message}\n\n"
+                    f"Current summary:\n{state.get('current_context_summary', '')}\n\n"
+                    f"Retrieved long-term memory:\n{json.dumps(state.get('long_term_memory_hits', []), ensure_ascii=False)}\n\n"
+                    f"Shared memory context:\n{self._format_shared_memory_context(state)}\n\n"
+                    f"Selected skill guidance:\n{self._format_skill_context(state)}\n\n"
+                    f"Tool results from this turn:\n{self._format_tool_results(state)}\n\n"
+                    f"Last run context:\n{last_run_context.model_dump_json() if last_run_context else '{}'}\n\n"
+                    f"Recognition result:\n{state.get('recognition_result').model_dump_json() if state.get('recognition_result') else '{}'}\n\n"
+                    f"Materials RAG context:\n{materials_rag_context or '(none)'}\n\n"
+                    f"Contextual grounding draft:\n{contextual_answer or ''}\n\n"
+                    f"Conversation history:\n{json.dumps([turn.model_dump(mode='json') for turn in state.get('messages', [])[-8:]], ensure_ascii=False)}"
+                )
             try:
                 answer = self.llm_client.chat_text(
-                    system_prompt=(
-                        "You are the ChatAgent for a materials research system. "
-                        "Answer clearly in Chinese. "
-                        "You must use the provided last_run_context, recognition_result, and contextual grounding when relevant. "
-                        "Treat shared memory locked facts as explicit user or execution constraints; do not silently override them. "
-                        "When materials RAG context is provided, use it as grounded background knowledge and prefer it over unsupported free-form speculation. "
-                        "If the user asks about the previous run, answer from that context instead of pretending nothing happened. "
-                        "Do not claim tool execution that did not happen in this turn. "
-                        "Do not invent browsing,联网,数据库访问,外部检索,插件调用, or hidden system capabilities unless they are explicitly present in the supplied context for this turn or are part of the configured system capabilities. "
-                        "If future web research capability is supported, only describe it as available when it is actually configured or invoked; otherwise answer conservatively. "
-                        "Do not describe yourself as a generic internet-enabled assistant by default; stay grounded in this materials research agent project and the currently active tools. "
-                        "Do not speculate about model provider, model family, or deployment identity unless the user is explicitly asking and the answer is present in the provided context. "
-                        "If capability boundaries are unclear, answer conservatively and focus on what the current run, artifacts, and memory actually show."
-                    ),
-                    user_prompt=(
-                        f"User message:\n{request.message}\n\n"
-                        f"Current summary:\n{state.get('current_context_summary', '')}\n\n"
-                        f"Retrieved long-term memory:\n{json.dumps(state.get('long_term_memory_hits', []), ensure_ascii=False)}\n\n"
-                        f"Shared memory context:\n{self._format_shared_memory_context(state)}\n\n"
-                        f"Selected skill guidance:\n{self._format_skill_context(state)}\n\n"
-                        f"Tool results from this turn:\n{self._format_tool_results(state)}\n\n"
-                        f"Last run context:\n{state.get('last_run_context').model_dump_json() if state.get('last_run_context') else '{}'}\n\n"
-                        f"Recognition result:\n{state.get('recognition_result').model_dump_json() if state.get('recognition_result') else '{}'}\n\n"
-                        f"Materials RAG context:\n{materials_rag_context or '(none)'}\n\n"
-                        f"Contextual grounding draft:\n{contextual_answer or ''}\n\n"
-                        f"Conversation history:\n{json.dumps([turn.model_dump(mode='json') for turn in state.get('messages', [])[-8:]], ensure_ascii=False)}"
-                    ),
-                    max_tokens=1200,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=chat_max_tokens,
                     temperature=0.2,
+                    capability="rag.answer" if materials_rag_context else "chat.answer",
                 )
             except RuntimeError as exc:
                 if settings.require_llm_for_agents:
@@ -1022,13 +1154,24 @@ class ChatAgent:
             "html_content": "",
             "html_path": "",
             "response_metadata": {
+                "chat_prompt_mode": chat_prompt_mode,
+                "chat_max_tokens": chat_max_tokens,
                 "materials_rag": {
                     "used": bool(materials_rag_payload.get("hits")),
+                    "requested": bool(materials_rag_payload.get("requested")),
+                    "gate_reason": materials_rag_payload.get("gate_reason", ""),
                     "hit_count": len(materials_rag_payload.get("hits", [])),
                     "domain": materials_rag_payload.get("domain"),
                     "doc_type": materials_rag_payload.get("doc_type"),
                     "material": materials_rag_payload.get("material"),
                     "titles": [hit.document.title for hit in materials_rag_payload.get("hits", [])[:3]],
+                    "duration_ms": materials_rag_payload.get("duration_ms", 0.0),
+                    "embedding_backends": list(
+                        dict.fromkeys(hit.embedding_backend for hit in materials_rag_payload.get("hits", []) if hit.embedding_backend)
+                    ),
+                    "reranker_backends": list(
+                        dict.fromkeys(hit.reranker_backend for hit in materials_rag_payload.get("hits", []) if hit.reranker_backend)
+                    ),
                 },
                 "shared_memory_context_used": bool(
                     isinstance(state.get("shared_memory_context"), dict)
@@ -1038,6 +1181,8 @@ class ChatAgent:
             "response_summary": {
                 "materials_rag": {
                     "used": bool(materials_rag_payload.get("hits")),
+                    "requested": bool(materials_rag_payload.get("requested")),
+                    "gate_reason": materials_rag_payload.get("gate_reason", ""),
                     "titles": [hit.document.title for hit in materials_rag_payload.get("hits", [])[:3]],
                 }
             },

@@ -13,6 +13,7 @@ from app.core.cancellation import RunCancelledError, clear_cancellation
 from app.core.llm import LLMClient, LLMRequiredError
 from app.lammps.attachments import infer_request_overrides, persist_uploaded_assets
 from app.lammps.config import LammpsConfig, lammps_config_public_payload, load_lammps_config
+from app.lammps.multifidelity import evaluate_pilot, plan_multifidelity_run
 from app.lammps.preflight import LAMMPS_PREFLIGHT_NODE_IDS, build_lammps_preflight_plan
 from app.lammps.postprocess import convert_dump, generate_diffusion_trajectory_if_applicable, generate_plot
 from app.lammps.quality import ThermoParseError, build_physical_quality_report, write_physical_quality_report
@@ -31,6 +32,7 @@ from app.lammps.template import get_lammps_form_schema, generate_lammps_input
 from app.lammps.validator import validate_request
 from app.materials_rag.service import MaterialsRagService
 from app.materials_rag.normalizer import extract_materials, normalize_material
+from app.rag.uncertainty import estimate_retrieval_uncertainty
 from app.orchestration import (
     DAGExecutionContext,
     DAGExecutionResult,
@@ -39,9 +41,12 @@ from app.orchestration import (
     DAGNodeResult,
     DAGPlan,
     ReplanBudgetState,
+    ProcessRewardModel,
     TaskLifecycleController,
     apply_level_1_fallbacks,
+    build_plan_variants,
     decide_degradation,
+    search_plans,
 )
 from app.runtimes.telemetry import build_runtime_execution_profile, initialize_runtime_state
 from app.state import (
@@ -288,6 +293,9 @@ class LammpsRuntime:
                     "lexical_score": getattr(hit, "lexical_score", 0.0),
                     "bm25_score": getattr(hit, "bm25_score", 0.0),
                     "vector_score": getattr(hit, "vector_score", 0.0),
+                    "graph_score": getattr(hit, "graph_score", 0.0),
+                    "graph_paths": list(getattr(hit, "graph_paths", [])),
+                    "graph_community": getattr(hit, "graph_community", ""),
                     "embedding_backend": getattr(hit, "embedding_backend", ""),
                     "matched_fields": list(hit.matched_fields),
                     "source": hit.document.source,
@@ -323,6 +331,7 @@ class LammpsRuntime:
             "material": material_hint,
             "hits": hits,
             "context": context,
+            "retrieval_uncertainty": estimate_retrieval_uncertainty(hits).public_payload(),
         }
 
     def _planning_materials_rag_serialized_hits(self, planning_rag: dict[str, object]) -> list[dict[str, object]]:
@@ -500,6 +509,7 @@ class LammpsRuntime:
             "hits": serialized_hits,
             "serialized_hits": serialized_hits,
             "context": planning_rag.get("context", ""),
+            "retrieval_uncertainty": planning_rag.get("retrieval_uncertainty", {}),
         }
         return {
             "planning_rag": planning_payload,
@@ -687,6 +697,27 @@ class LammpsRuntime:
             requires_attachment=bool(request.uploaded_assets),
             metadata={"run_id": run_id, "conversation_id": request.conversation_id},
         )
+        risk_hint = self._heuristic_request(request.message, request.notes)
+        plan_risk = 0.35
+        plan_risk += 0.2 if request.uploaded_assets else 0.0
+        plan_risk += 0.15 if risk_hint.get("task_type") == "heating" else 0.0
+        plan_risk += 0.2 if int(risk_hint.get("temperature") or 0) > 1200 else 0.0
+        plan_risk += 0.15 if int(risk_hint.get("steps") or 0) > 10_000 else 0.0
+        plan_risk = min(plan_risk, 1.0)
+        plan_search = search_plans(
+            build_plan_variants(plan),
+            latency_budget_seconds=min(plan.global_timeout_seconds, 35 * 60),
+            risk_level=plan_risk,
+        )
+        plan = plan_search.selected_plan.model_copy(
+            update={
+                "metadata": {
+                    **plan_search.selected_plan.metadata,
+                    "process_reward_search": plan_search.public_payload(),
+                    "plan_risk_level": plan_risk,
+                }
+            }
+        )
         if lifecycle is not None:
             lifecycle.record_plan_created(plan, metadata={"created_from": "initial"})
             lifecycle.save_checkpoint(stage="after_plan", plan=plan, metadata={"created_from": "initial"})
@@ -847,6 +878,8 @@ class LammpsRuntime:
                 "metadata": {
                     **result.metadata,
                     "degradation": decision_payload,
+                    "plan_search": plan_search.public_payload(),
+                    "process_reward": ProcessRewardModel().score_execution(final_plan, result),
                 }
             }
         )
@@ -862,6 +895,69 @@ class LammpsRuntime:
                 )
             lifecycle.save_checkpoint(stage="after_preflight_dag", plan=final_plan, dag_result=result)
         return result, context.metadata
+
+    def _run_multifidelity_pilot(
+        self,
+        *,
+        request_payload: dict[str, Any],
+        output_dir: Path,
+        config: LammpsConfig,
+        run_id: str,
+    ) -> dict[str, Any]:
+        plan = plan_multifidelity_run(request_payload, enabled=config.lammps_multifidelity_enabled)
+        report: dict[str, Any] = {"schema_version": "lammps-multifidelity/v1", "plan": plan.public_payload()}
+        if not plan.requires_pilot:
+            report["decision"] = {
+                "action": "skip",
+                "reasons": ["pilot_not_required"],
+                "value_of_information": 0.0,
+            }
+            write_json_file(output_dir / "multifidelity_report.json", report)
+            return report
+
+        pilot_dir = output_dir / "pilot"
+        pilot_dir.mkdir(parents=True, exist_ok=True)
+        pilot_request = {
+            **request_payload,
+            "steps": plan.pilot_steps,
+            "dump_file": "pilot.dump",
+            "script_name": "pilot.in.lammps",
+        }
+        pilot_input = generate_lammps_input(pilot_request, pilot_dir, potentials_dir=config.potentials_dir)
+        metrics: dict[str, Any] = {}
+        execution_success = False
+        error = ""
+        try:
+            _, _, metrics = run_lammps(pilot_input, pilot_dir, pilot_request, config, run_id)
+            execution_success = True
+        except Exception as exc:  # noqa: BLE001 - converted into a value-of-information decision.
+            error = str(exc)
+        quality = build_physical_quality_report(
+            output_dir=pilot_dir,
+            request=pilot_request,
+            run_mode="real",
+            metrics=metrics,
+            execution_error=error,
+        )
+        decision = evaluate_pilot(
+            plan,
+            execution_success=execution_success,
+            quality_passed=quality.passed,
+            scientific_result_passed=quality.scientific_result_passed,
+            metrics=metrics,
+            fatal_anomalies=len(quality.log_errors),
+        )
+        report.update(
+            {
+                "pilot_request": pilot_request,
+                "pilot_metrics": metrics,
+                "pilot_error": error,
+                "pilot_quality": quality.model_dump(mode="json"),
+                "decision": decision.public_payload(),
+            }
+        )
+        write_json_file(output_dir / "multifidelity_report.json", report)
+        return report
 
     def _parse_request(
         self,
@@ -1756,6 +1852,7 @@ potentials_dir={config.potentials_dir}
                 "hits": [],
                 "serialized_hits": [],
                 "context": "",
+                "retrieval_uncertainty": estimate_retrieval_uncertainty([]).public_payload(),
             }
         serialized_planning_hits = self._planning_materials_rag_serialized_hits(planning_rag)
         state["materials_rag"] = {
@@ -1763,6 +1860,7 @@ potentials_dir={config.potentials_dir}
                 "query": planning_rag["query"],
                 "material": planning_rag["material"],
                 "hits": serialized_planning_hits,
+                "retrieval_uncertainty": planning_rag.get("retrieval_uncertainty", {}),
                 "source": "preflight_dag" if preflight_used else "legacy_preflight",
             }
         }
@@ -1954,6 +2052,22 @@ potentials_dir={config.potentials_dir}
                 content=generated_input,
                 metadata={"attempt": attempt + 1},
             )
+            ir_artifacts = [
+                self._build_artifact(
+                    run_id=run_id,
+                    kind="json",
+                    name="lammps_ir.json",
+                    path=output_dir / "lammps_ir.json",
+                    metadata={"artifact_role": "typed_simulation_ir", "compiler": "matterlab-neurosymbolic/v1"},
+                ),
+                self._build_artifact(
+                    run_id=run_id,
+                    kind="json",
+                    name="lammps_ir_validation.json",
+                    path=output_dir / "lammps_ir_validation.json",
+                    metadata={"artifact_role": "symbolic_constraint_report"},
+                ),
+            ]
             request_artifact_path = output_dir / "request.json"
             write_json_file(
                 request_artifact_path,
@@ -1973,7 +2087,7 @@ potentials_dir={config.potentials_dir}
                 output_data={"input_path": str(input_path)},
                 description="Generate the LAMMPS input script from the validated structured request.",
                 stage=f"lammps_input_codegen_{attempt + 1}",
-                artifacts=[input_artifact, request_artifact],
+                artifacts=[input_artifact, request_artifact, *ir_artifacts],
             )
 
             self._transition_lifecycle(
@@ -2006,6 +2120,34 @@ potentials_dir={config.potentials_dir}
             try:
                 if config.force_mock:
                     raise RuntimeError("Mock mode forced by USE_MOCK=true.")
+                multifidelity_report = self._run_multifidelity_pilot(
+                    request_payload=request_payload,
+                    output_dir=output_dir,
+                    config=config,
+                    run_id=run_id,
+                )
+                state["multifidelity"] = multifidelity_report
+                multifidelity_artifact = self._build_artifact(
+                    run_id=run_id,
+                    kind="json",
+                    name="multifidelity_report.json",
+                    path=output_dir / "multifidelity_report.json",
+                    metadata={"artifact_role": "value_of_information_simulation_policy"},
+                )
+                self._record_step(
+                    state,
+                    tool_name="lammps_multifidelity_scheduler",
+                    success=str(multifidelity_report.get("decision", {}).get("action")) in {"skip", "continue_full"},
+                    summary=f"多保真调度决策：{multifidelity_report.get('decision', {}).get('action', 'unknown')}。",
+                    input_data={"request": request_payload},
+                    output_data=multifidelity_report,
+                    description="Estimate value of information with a short pilot before an expensive full run.",
+                    stage=f"lammps_multifidelity_{attempt + 1}",
+                    artifacts=[multifidelity_artifact],
+                )
+                pilot_action = str(multifidelity_report.get("decision", {}).get("action") or "skip")
+                if pilot_action in {"repair", "stop"}:
+                    raise RuntimeError(f"Multi-fidelity pilot rejected the full run: {pilot_action}.")
                 mode, error, metrics = run_lammps(input_path, output_dir, request_payload, config, run_id)
             except RunCancelledError:
                 return self._finalize(

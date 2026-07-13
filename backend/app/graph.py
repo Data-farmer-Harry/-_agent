@@ -717,7 +717,7 @@ class AgentAppGraph:
 
     def summarize_context_node(self, state: AgentGraphState) -> dict[str, Any]:
         previous_long_term = state.get("memory_snapshot").long_term if state.get("memory_snapshot") else None
-        summary = self.memory_store.summarize(
+        summary, long_term_snapshot = self.memory_store.summarize_with_snapshot(
             state.get("messages", []),
             state.get("last_run_context"),
             recognition_result=state.get("recognition_result"),
@@ -734,7 +734,11 @@ class AgentAppGraph:
             description="Condense the conversation while preserving last-run context for follow-up turns.",
             stage="summarize",
         )
-        return {**updates, "current_context_summary": summary}
+        return {
+            **updates,
+            "current_context_summary": summary,
+            "long_term_memory_snapshot": long_term_snapshot,
+        }
 
     def save_memory_node(self, state: AgentGraphState) -> dict[str, Any]:
         snapshot = self.memory_store.build_next_snapshot(
@@ -745,6 +749,7 @@ class AgentAppGraph:
             last_run_context=state.get("last_run_context"),
             current_context_summary=state.get("current_context_summary", ""),
             previous_snapshot=state.get("memory_snapshot"),
+            long_term_snapshot=state.get("long_term_memory_snapshot"),
         )
         saved_paths = self.memory_store.save(snapshot)
         updates = self._record_step(
@@ -857,8 +862,11 @@ class AgentAppGraph:
             hit_count = len(planning_hits) + len(error_hits)
         return {
             "available": True,
+            "requested": bool(materials.get("requested")),
             "used": bool(materials.get("used")) or hit_count > 0,
+            "gate_reason": str(materials.get("gate_reason") or ""),
             "hit_count": hit_count,
+            "duration_ms": materials.get("duration_ms") or 0.0,
             "planning_hit_count": len(planning_hits),
             "error_hit_count": len(error_hits),
             "domain": materials.get("domain") or planning.get("domain") or error_diagnosis.get("domain") or "",

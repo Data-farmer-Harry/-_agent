@@ -19,8 +19,13 @@
 | 工具调用层 | 已实现 | 有轻量 Tool Router，只在任务需要时触发 function-calling 风格工具，而不是每轮对话强行调用。 |
 | MCP 协议 | 已实现 | 既能把本项目暴露为 MCP stdio server，也能通过外部 MCP adapter 接入可信的第三方 MCP 工具。 |
 | 动态 LLM 路由 | 已实现 | 基于规则路由选择 `fast / balanced / strong / vision`，并支持本地小型 MLP 推荐器做 shadow 或 guarded 决策。 |
+| 按需 RAG 门控 | 已实现 | 普通对话和简单概念直接回答；只有专业查证、复杂材料问题或用户明确要求依据时才触发检索。 |
 | 共享记忆 | 已实现 | SQLite 存储、去重、冲突检测、证据引用、上下文压缩、跨 Agent 可复用记忆。 |
 | DAG 并发与恢复 | 已实现 | LAMMPS preflight 和通用 orchestration 使用 DAG、状态机、checkpoint、replan 和降级策略。 |
+| PRM 搜索式规划 | 已实现 | 为 baseline/robust/efficient 候选 DAG 计算步骤级 reward，并输出运行时 process reward trace。 |
+| 神经—符号 LAMMPS 编译 | 已实现 | 请求先转换为带单位和 provenance 的 Simulation IR，经约束验证后确定性生成脚本。 |
+| GraphRAG 与风险控制 | 已实现 | 融合 Material/Method/Tool/Phase/Potential 图传播，输出 answer/expand/escalate/abstain。 |
+| 多保真仿真调度 | 已实现，可选 | 以短程 pilot 的稳定性和 Value of Information 决定继续、修复或终止完整运行。 |
 | 可观测面板 | 已实现 | 前端结果面板展示 route、tool、RAG、shared memory、LLM routing、MLP 推荐和状态节点。 |
 | 评测体系 | 已实现 | MaterialsAgentBench 当前 22 个源数据集、390 个 case、13 个领域，包含规则指标、LLM-as-Judge、bootstrap CI、effect size。 |
 | 前端工作台 | 已实现 | React + Vite 页面，支持聊天、异步 job、设置、运行结果、artifact 预览、trace 和诊断面板。 |
@@ -71,8 +76,14 @@ flowchart TD
 | `backend/app/thermo/` | CALPHAD 相图能力：解析、代码生成、pycalphad 引擎、TDB registry、Thermo RAG。 |
 | `backend/app/materials_rag/` | 材料知识 RAG，包括文档存储、normalizer、retriever、vector、context builder。 |
 | `backend/app/rag/` | 通用 RAG 组件，包括 query rewrite、reranker、sqlite vector store 和数据管理。 |
+| `backend/app/core/llm_route_learning.py` | 本地 MLP 特征、模型加载、推理和安全推荐；只提取当前任务正文，避免上下文模板噪声。 |
+| `backend/app/lammps/ir.py` | 类型化 LAMMPS Simulation IR 与神经—符号约束编译。 |
+| `backend/app/lammps/multifidelity.py` | Pilot/full 多保真策略和 Value-of-Information 决策。 |
+| `backend/app/materials_rag/graph.py` | 材料异构图、关系传播和 community summary。 |
+| `backend/app/rag/uncertainty.py` | 检索置信度、校准、升级与拒答策略。 |
 | `backend/app/shared_memory/` | 共享记忆系统，包括 SQLite store、检索、去重、冲突检测和 Agent 集成。 |
 | `backend/app/orchestration/` | DAG、生命周期状态机、并发 executor、replan 策略和 fingerprint。 |
+| `backend/app/orchestration/reward.py` | Process Reward Model、候选计划生成和 Best-of-N 搜索。 |
 | `backend/app/tools/` | Function-calling 工具层，包括 registry、router、executor、policy、MCP adapter、内置工具。 |
 | `backend/app/skills/` | 本地 skills 注册与路由，用来给 Agent 补充可选的专业流程。 |
 | `backend/app/mcp_server.py` | 把研材体暴露为 MCP stdio server 的实现。 |
@@ -238,7 +249,7 @@ LLM 调用不是固定走同一个模型。系统会根据任务类型、难度�
 
 | Tier | 适合任务 | 说明 |
 | --- | --- | --- |
-| `fast` | 简单问答、低风险摘要、轻量 memory 查询 | 成本低、速度快。 |
+| `fast` | 简单问答、低风险摘要、轻量 memory 查询 | 直连 DeepSeek `deepseek-v4-flash`，成本低、速度快。 |
 | `balanced` | 一般 RAG、query rewrite、普通 supervisor 决策 | 平衡速度和质量。 |
 | `strong` | LAMMPS、相图、修复、judge、复杂推理、代码生成 | 质量优先。 |
 | `vision` | 图像识别、相图重构、多模态输入 | 需要视觉能力。 |
@@ -249,7 +260,7 @@ LLM 调用不是固定走同一个模型。系统会根据任务类型、难度�
 cp backend/configs/llm_routing.example.json backend/configs/llm_routing.json
 ```
 
-真实 API key 不写进 JSON，而是写进 `backend/.env` 或系统环境变量。当前示例默认使用 OpenRouter compatible API，也可以接入其他 OpenAI-compatible endpoint。
+真实 API key 不写进 JSON，而是写进 `backend/.env` 或系统环境变量。`fast` tier 在示例配置中直连 DeepSeek API；`balanced`、`strong`、`vision` 如果没有单独覆盖，会继承中央 LLM 配置。路由器仍兼容其他 OpenAI-compatible endpoint。
 
 MLP 推荐器用于学习“什么任务该走哪个 tier”。它不是盲目替代规则路由，而是有两种安全模式：
 
@@ -270,7 +281,27 @@ conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py
 conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py --include-telemetry
 ```
 
-训练输出默认保存到 `backend/outputs/llm_route_mlp/`。这些是本地生成产物，不应该提交。路由遥测只记录隐私安全的特征、prompt hash、决策和指标，不记录原始 prompt 和 API key。
+训练输出默认保存到 `backend/models/llm_route_mlp/`，其中 `model.json` 是运行时加载的可移植模型，`metrics.json` 和 `report.md` 记录冻结训练结果。路由遥测只记录隐私安全的特征、prompt hash、决策和指标，不记录原始 prompt 和 API key。
+
+当前采用“规则安全基线 + 小型 MLP”的两层结构，没有继续叠加在线老虎机。原因是项目尚未形成稳定的线上 reward、成本标签和探索流量；此时在线策略会增加状态、延迟和不可复现性。MLP 训练集包含 clean、mixed、adversarial、long-noise 和真实 ChatAgent prompt wrapper 五类样本，部署时把“当前用户任务”与 memory/tool/RAG/history 包装区分开，再由 capability floor 保护 LAMMPS、repair、judge 和 vision 等高风险能力。
+
+RAG 同样改为按需触发。简单定义、寒暄、项目说明和上一轮 follow-up 不检索；LAMMPS 命令/报错、材料数据库、复杂专业问题，以及明确要求“知识库依据/引用/来源”的请求才进入 query rewrite、召回和 rerank。响应元数据会记录 `requested`、`used` 和 `gate_reason`，便于前端观察是否真的调用了 RAG。
+
+性能优化没有删掉高级链路。Supervisor 完成路由、置信度和 DAG 审计后，无 Tool/RAG/Skill/上一轮运行依赖的普通对话才使用 `lean_direct` 提示；锁定记忆、工具结果和专业 Skill 仍进入完整上下文。对 `lost atoms` 等唯一、结构化的 LAMMPS 错误标识，检索器用高精度 title/keyword/BM25 直达，避免多余的远程 embedding 和 reranker；模糊专业查询仍保留 dense vector + GraphRAG + 不确定性升级。远程 query embedding 同时使用进程 LRU 和 SQLite 持久缓存，SQLite 只保存 query hash 和向量，不保存原始问题文本。
+
+Supervisor 也不是纯规则分支，而是“确定性信号评分 + DAG 安全检查 + 低置信度 LLM 复核”。置信度不采信 LLM 自报分数，完全由程序按下式计算：
+
+```text
+confidence = 0.45 * route_evidence
+           + 0.25 * candidate_separation
+           + 0.20 * critical_check_pass_rate
+           + 0.10 * advisory_check_pass_rate
+           then apply deterministic penalties
+```
+
+`route_evidence` 来自图像、生成/识别/执行意图、材料体系、LAMMPS 必填槽位和历史上下文等可观测信号；`candidate_separation` 衡量第一、第二候选路由的差距；DAG 检查覆盖输入资产、计算前置条件、route contract、跨域冲突和拓扑合法性。存在关键节点失败、候选差距过小或置信度低于 `0.78` 时才请 LLM 复核；即使 LLM 给出高置信度，也不会改变程序计算分数。DAG 关键检查不通过时，系统会降级为补参/补图澄清，不盲目执行。
+
+LAMMPS preflight 同时增加了 PRM Best-of-N 候选计划选择；脚本生成改为 `LammpsRequest → 类型化 Simulation IR → 符号约束验证 → 确定性模板编译`。Materials RAG 增加图传播和检索不确定性，多保真模式可用短程 pilot 决定是否投入完整模拟。完整方法、配置和简历口径见 [`docs/ADVANCED_LEARNING_METHODS.md`](docs/ADVANCED_LEARNING_METHODS.md)。
 
 ## 9. DAG、状态机、replan 与降级策略
 

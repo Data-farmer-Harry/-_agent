@@ -31,6 +31,9 @@ class MaterialsRagHit(BaseModel):
     rerank_score: float | None = None
     reranker_backend: str = ""
     original_rank: int | None = None
+    graph_score: float = 0.0
+    graph_paths: list[str] = Field(default_factory=list)
+    graph_community: str = ""
     matched_fields: list[str] = Field(default_factory=list)
 
 
@@ -55,6 +58,9 @@ class MaterialsRagCandidate(BaseModel):
     rerank_score: float | None = None
     reranker_backend: str = ""
     original_rank: int | None = None
+    graph_score: float = 0.0
+    graph_paths: list[str] = Field(default_factory=list)
+    graph_community: str = ""
     matched_fields: list[str] = Field(default_factory=list)
     source: str = ""
     source_url: str = ""

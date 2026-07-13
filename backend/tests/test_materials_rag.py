@@ -26,7 +26,15 @@ from tests.support import ScriptedLLMClient, build_request
 
 
 class _RagAwareLLM(ScriptedLLMClient):
-    def chat_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1) -> str:
+    def chat_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 1000,
+        temperature: float = 0.1,
+        capability: str = "",
+    ) -> str:
         self.calls.append(
             {
                 "method": "chat_text",
@@ -34,6 +42,7 @@ class _RagAwareLLM(ScriptedLLMClient):
                 "user_prompt": user_prompt,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "capability": capability,
             }
         )
         if "Materials RAG context:" in user_prompt and "LAMMPS fix nvt" in user_prompt:
@@ -43,6 +52,7 @@ class _RagAwareLLM(ScriptedLLMClient):
             user_prompt=user_prompt,
             max_tokens=max_tokens,
             temperature=temperature,
+            capability=capability,
         )
 
 
@@ -66,6 +76,7 @@ class MaterialsRagTests(unittest.TestCase):
         settings.materials_rag_embedding_dimensions = 128
         settings.materials_rag_vector_weight = 0.24
         materials_vector._REMOTE_BACKEND_FAILURES.clear()
+        materials_vector._fetch_remote_query_embedding_cached.cache_clear()
 
     def tearDown(self) -> None:
         settings.materials_rag_embedding_backend = self._old_backend
@@ -78,6 +89,7 @@ class MaterialsRagTests(unittest.TestCase):
         settings.materials_rag_embedding_api_batch_size = self._old_batch_size
         settings.rag_vector_store_path = self._old_vector_store_path
         materials_vector._REMOTE_BACKEND_FAILURES.clear()
+        materials_vector._fetch_remote_query_embedding_cached.cache_clear()
         self._rag_tmp.cleanup()
 
     def test_embedding_api_can_use_dedicated_openai_compatible_endpoint(self) -> None:
@@ -148,6 +160,25 @@ class MaterialsRagTests(unittest.TestCase):
         self.assertEqual(hits[0].embedding_backend, "local_hash")
         self.assertIn("vector", hits[0].matched_fields)
 
+    def test_exact_lammps_error_uses_high_precision_lexical_shortcut(self) -> None:
+        with patch(
+            "app.materials_rag.retriever.build_embedding_with_backend",
+            side_effect=AssertionError("exact error lookup should not call query embedding"),
+        ), patch(
+            "app.materials_rag.retriever.rerank_texts",
+            side_effect=AssertionError("exact error lookup should not call remote reranker"),
+        ):
+            hits = MaterialsRagService.search(
+                "LAMMPS lost atoms 报错怎么办？",
+                domain="lammps",
+                doc_type="error_cookbook",
+                top_k=4,
+            )
+
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].document.id, "lammps.error.lost_atoms")
+        self.assertEqual(hits[0].embedding_backend, "lexical_shortcut")
+
     def test_material_document_embeddings_are_reused_after_memory_cache_reset(self) -> None:
         first = materials_retriever._build_index()
         self.assertTrue(first)
@@ -159,6 +190,23 @@ class MaterialsRagTests(unittest.TestCase):
             second = materials_retriever._build_index()
 
         self.assertEqual(len(second), len(first))
+
+    def test_online_request_reuses_content_current_index_when_preferred_backend_changes(self) -> None:
+        first = materials_retriever._build_index()
+        self.assertTrue(first)
+        settings.materials_rag_embedding_backend = "llm_api"
+        settings.materials_rag_embedding_api_base_url = "https://openrouter.ai/api/v1"
+        settings.materials_rag_embedding_api_key = "embedding-key"
+        settings.materials_rag_embedding_model = "openai/text-embedding-3-small"
+        materials_retriever._INDEX_CACHE_KEY = None
+        materials_retriever._INDEX_CACHE_DOCUMENTS = ()
+        materials_retriever._INDEX_CACHE_BM25 = None
+
+        with patch("app.materials_rag.retriever.build_embeddings", side_effect=AssertionError("online reindex must not run")):
+            second = materials_retriever._build_index()
+
+        self.assertEqual(len(second), len(first))
+        self.assertEqual(second[0].embedding_backend, "local_hash")
 
     def test_search_retrieves_msd_diffusion_command(self) -> None:
         hits = MaterialsRagService.search("MSD 怎么算扩散系数？", domain="lammps", top_k=5)
@@ -287,11 +335,53 @@ class MaterialsRagTests(unittest.TestCase):
                 "current_context_summary": "",
             }
 
-            result = agent.run(state)
+            with patch.object(agent.materials_rag_service, "search", wraps=agent.materials_rag_service.search) as search:
+                with patch.object(agent.materials_rag_service, "build_context", side_effect=AssertionError("duplicate search")):
+                    result = agent.run(state)
 
         self.assertIn("RAG_CONTEXT_INCLUDED", result["final_answer"])
+        self.assertEqual(search.call_count, 1)
         self.assertTrue(result["response_metadata"]["materials_rag"]["used"])
         self.assertIn("LAMMPS fix nvt", result["response_metadata"]["materials_rag"]["titles"])
+
+    def test_chat_agent_skips_rag_for_simple_materials_definition(self) -> None:
+        llm = ScriptedLLMClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(llm_client=llm, artifact_service=ArtifactService(root_dir=Path(tmp)))
+            state: AgentGraphState = {
+                "request": build_request("共析点是什么？"),
+                "messages": [],
+                "uploaded_assets": [],
+                "last_run_context": LastRunContext(),
+                "current_context_summary": "",
+            }
+
+            with patch.object(agent.materials_rag_service, "search", side_effect=AssertionError("simple question should not retrieve")):
+                result = agent.run(state)
+
+        rag_metadata = result["response_metadata"]["materials_rag"]
+        self.assertFalse(rag_metadata["requested"])
+        self.assertFalse(rag_metadata["used"])
+        self.assertEqual(rag_metadata["gate_reason"], "direct_answer_sufficient")
+
+    def test_chat_agent_uses_rag_when_simple_question_explicitly_requests_evidence(self) -> None:
+        llm = ScriptedLLMClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = ChatAgent(llm_client=llm, artifact_service=ArtifactService(root_dir=Path(tmp)))
+            state: AgentGraphState = {
+                "request": build_request("共析点是什么？请给出知识库依据。"),
+                "messages": [],
+                "uploaded_assets": [],
+                "last_run_context": LastRunContext(),
+                "current_context_summary": "",
+            }
+
+            result = agent.run(state)
+
+        rag_metadata = result["response_metadata"]["materials_rag"]
+        self.assertTrue(rag_metadata["requested"])
+        self.assertTrue(rag_metadata["used"])
+        self.assertEqual(rag_metadata["gate_reason"], "explicit_grounding_request")
 
     def test_supervisor_routes_lammps_explanation_to_chat_not_runtime(self) -> None:
         supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())

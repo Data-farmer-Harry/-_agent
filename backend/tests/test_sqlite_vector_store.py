@@ -8,6 +8,25 @@ from app.rag.sqlite_vector_store import SqliteVectorStore, content_digest
 
 
 class SqliteVectorStoreTests(unittest.TestCase):
+    def test_query_embedding_cache_persists_without_storing_raw_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "query-cache.sqlite3"
+            store = SqliteVectorStore(path)
+            store.cache_query_embedding(
+                embedding_signature="test-model:4",
+                text="private scientific query",
+                vector=(1.0, 0.0, 0.5, -0.5),
+            )
+
+            cached = SqliteVectorStore(path).get_cached_query_embedding(
+                embedding_signature="test-model:4",
+                text="private scientific query",
+            )
+            serialized = path.read_bytes()
+
+        self.assertEqual(cached, (1.0, 0.0, 0.5, -0.5))
+        self.assertNotIn(b"private scientific query", serialized)
+
     def test_sqlite_vec_persists_collection_and_returns_cosine_neighbors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "vectors.sqlite3"

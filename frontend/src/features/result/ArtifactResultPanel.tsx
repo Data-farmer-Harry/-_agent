@@ -166,6 +166,15 @@ interface AgentObservabilityRouteView {
   decisionSource: string;
   confidence: number | null;
   reason: string;
+  supervisorAuditPassed: boolean | null;
+  supervisorRequiresReview: boolean | null;
+  supervisorLlmReviewed: boolean | null;
+  supervisorDagValid: boolean | null;
+  supervisorDagNodeCount: number;
+  supervisorConfidenceMargin: number | null;
+  supervisorConfidenceSource: string;
+  supervisorTopRoute: string;
+  supervisorFailures: string[];
 }
 
 interface AgentObservabilityToolResult {
@@ -193,7 +202,9 @@ interface AgentObservabilityToolsView {
 
 interface AgentObservabilityRagView {
   materialsAvailable: boolean;
+  materialsRequested: boolean;
   materialsUsed: boolean;
+  materialsGateReason: string;
   materialsHitCount: number;
   materialsPlanningHits: number;
   materialsErrorHits: number;
@@ -406,6 +417,10 @@ function readAgentObservability(payload: Record<string, unknown>, routeName: str
   const toolsObs = readObject(obs.tools);
   const ragObs = readObject(obs.rag);
   const llmObs = readObject(obs.llm_routing || payload.llm_routing);
+  const supervisorDecision = readObject(routeObs.supervisor_decision || payload.supervisor_decision);
+  const supervisorAudit = readObject(supervisorDecision.supervisor_audit);
+  const supervisorDag = readObject(supervisorAudit.dag);
+  const supervisorFormula = readObject(supervisorAudit.confidence_formula);
 
   const route: AgentObservabilityRouteView = {
     name: String(routeObs.name || routeName || payload.route_name || 'conversation.answer'),
@@ -416,6 +431,15 @@ function readAgentObservability(payload: Record<string, unknown>, routeName: str
     decisionSource: String(routeObs.decision_source || payload.decision_source || ''),
     confidence: readNumber(routeObs.decision_confidence ?? payload.decision_confidence),
     reason: String(routeObs.reason || payload.reason || ''),
+    supervisorAuditPassed: readBoolean(supervisorAudit.passed),
+    supervisorRequiresReview: readBoolean(supervisorAudit.requires_llm_review),
+    supervisorLlmReviewed: readBoolean(supervisorAudit.llm_reviewed),
+    supervisorDagValid: readBoolean(supervisorDag.valid),
+    supervisorDagNodeCount: readNumber(supervisorDag.node_count) ?? 0,
+    supervisorConfidenceMargin: readNumber(supervisorAudit.confidence_margin),
+    supervisorConfidenceSource: String(supervisorFormula.source || ''),
+    supervisorTopRoute: String(supervisorAudit.top_route || ''),
+    supervisorFailures: readStringArray(supervisorAudit.critical_failures),
   };
 
   const toolPolicy = readObject(toolsObs.policy || payload.tool_policy);
@@ -471,7 +495,9 @@ function readAgentObservability(payload: Record<string, unknown>, routeName: str
 
   const rag: AgentObservabilityRagView = {
     materialsAvailable: Boolean(materials.available) || Boolean(Object.keys(materials).length),
+    materialsRequested: Boolean(materials.requested),
     materialsUsed: Boolean(materials.used) || materialsHitCount > 0,
+    materialsGateReason: String(materials.gate_reason || ''),
     materialsHitCount,
     materialsPlanningHits: readNumber(materials.planning_hit_count) ?? planningHits.length,
     materialsErrorHits: readNumber(materials.error_hit_count) ?? errorHits.length,
@@ -1320,9 +1346,21 @@ function AgentObservabilityCard({ view }: { view: AgentObservabilityView }) {
     view.route.selectedTool && `tool: ${view.route.selectedTool}`,
     view.route.decisionSource && `source: ${view.route.decisionSource}`,
     view.route.confidence !== null && `confidence ${Math.round(view.route.confidence * 100)}%`,
+    view.route.supervisorDagValid !== null && `DAG ${view.route.supervisorDagValid ? 'passed' : 'failed'}`,
+    view.route.supervisorLlmReviewed === true
+      ? 'LLM reviewed'
+      : view.route.supervisorRequiresReview === true
+        ? 'review required'
+        : view.route.supervisorLlmReviewed === false
+          ? 'deterministic'
+          : '',
   ].filter(Boolean) as string[];
   const ragChips = [
-    view.rag.materialsAvailable ? `materials hits ${view.rag.materialsHitCount}` : 'materials RAG idle',
+    view.rag.materialsRequested
+      ? `materials hits ${view.rag.materialsHitCount}`
+      : view.rag.materialsAvailable
+        ? 'materials RAG skipped'
+        : 'materials RAG idle',
     view.rag.thermoAvailable ? `thermo candidates ${view.rag.thermoCandidateCount}` : 'thermo RAG idle',
     view.rag.sharedAvailable ? `memory selected ${view.rag.sharedSelectedCount}` : 'memory idle',
   ];
@@ -1345,7 +1383,7 @@ function AgentObservabilityCard({ view }: { view: AgentObservabilityView }) {
           </div>
         </div>
         <div className="flex flex-wrap justify-end gap-2 text-[11px] font-semibold">
-          {routeChips.slice(0, 5).map((chip) => (
+          {routeChips.slice(0, 7).map((chip) => (
             <span key={chip} className="rounded-full border border-cyan-200/20 bg-black/20 px-3 py-1">
               {chip}
             </span>
@@ -1361,6 +1399,20 @@ function AgentObservabilityCard({ view }: { view: AgentObservabilityView }) {
           </div>
           <p className="mt-2 text-sm font-semibold">{view.route.intent || view.route.name}</p>
           <p className="mt-1 line-clamp-3 text-[11px] leading-5 text-cyan-50/70">{view.route.reason || 'No route reason returned.'}</p>
+          {view.route.supervisorConfidenceSource ? (
+            <div className="mt-2 border-t border-cyan-200/10 pt-2 text-[10px] leading-5 text-cyan-50/60">
+              <p>
+                {view.route.supervisorConfidenceSource} · top {view.route.supervisorTopRoute || view.route.name}
+                {view.route.supervisorConfidenceMargin !== null
+                  ? ` · margin ${Math.round(view.route.supervisorConfidenceMargin * 100)}%`
+                  : ''}
+              </p>
+              <p>
+                DAG {view.route.supervisorDagValid ? 'valid' : 'invalid'} · {view.route.supervisorDagNodeCount} nodes
+                {view.route.supervisorFailures.length ? ` · failed ${view.route.supervisorFailures.join(', ')}` : ''}
+              </p>
+            </div>
+          ) : null}
         </div>
 
         <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
@@ -1405,6 +1457,10 @@ function AgentObservabilityCard({ view }: { view: AgentObservabilityView }) {
           {view.rag.materialsTitles.length ? (
             <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-cyan-50/65">
               {view.rag.materialsTitles.slice(0, 3).join(' · ')}
+            </p>
+          ) : view.rag.materialsGateReason ? (
+            <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-cyan-50/65">
+              gate: {view.rag.materialsGateReason}
             </p>
           ) : null}
         </div>

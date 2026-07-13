@@ -17,7 +17,6 @@ _FEATURE_NAMES = (
     "bias_hint",
     "log_total_chars",
     "log_user_chars",
-    "log_system_chars",
     "max_tokens_norm",
     "temperature",
     "multimodal",
@@ -82,6 +81,21 @@ _CAPABILITY_MARKERS: dict[str, tuple[str, ...]] = {
     "vision": ("vision", "recognition", "multimodal"),
 }
 
+_ROUTING_FOCUS_PREFIXES = (
+    "User message:\n",
+    "Current user message:\n",
+    "Request message:\n",
+)
+_ROUTING_FOCUS_SUFFIXES = (
+    "\n\nCurrent summary:\n",
+    "\n\nRetrieved long-term memory:\n",
+    "\n\nShared memory context:\n",
+    "\n\nSelected skill guidance:\n",
+    "\n\nTool results from this turn:\n",
+    "\n\nLast run context:\n",
+    "\n\nConversation history:\n",
+)
+
 
 @dataclass(frozen=True)
 class RouteFeatureVector:
@@ -94,7 +108,7 @@ class RouteFeatureVector:
 class LearnedPolicyConfig:
     enabled: bool = False
     mode: str = "shadow"
-    model_path: str = "backend/outputs/llm_route_mlp/model.json"
+    model_path: str = "backend/models/llm_route_mlp/model.json"
     confidence_threshold: float = 0.62
     allow_downgrade: bool = False
 
@@ -129,13 +143,17 @@ def extract_route_features(
     multimodal: bool = False,
 ) -> RouteFeatureVector:
     text = f"{system_prompt}\n{user_prompt}"
-    lowered = text.lower()
+    focus_text = routing_focus_text(user_prompt)
+    lowered_focus = focus_text.lower()
     capability_lower = capability.strip().lower().replace("_", ".").replace("-", ".")
     total_chars = len(text)
-    user_chars = len(user_prompt)
+    user_chars = len(focus_text)
     system_chars = len(system_prompt)
 
-    marker_counts = {name: _count_markers(lowered, markers) for name, markers in _MARKERS.items()}
+    # Task markers come from the actual request rather than prompt-wrapper
+    # headings such as "Memory", "Tool results", or "RAG context". The full
+    # prompt length remains a separate load signal.
+    marker_counts = {name: _count_markers(lowered_focus, markers) for name, markers in _MARKERS.items()}
     cap_flags = {
         name: float(any(marker in capability_lower for marker in markers))
         for name, markers in _CAPABILITY_MARKERS.items()
@@ -145,7 +163,6 @@ def extract_route_features(
         1.0,
         _log_norm(total_chars),
         _log_norm(user_chars),
-        _log_norm(system_chars),
         min(max_tokens, 6000) / 6000.0,
         max(0.0, min(float(temperature), 1.0)),
         float(multimodal),
@@ -184,12 +201,34 @@ def extract_route_features(
         debug={
             "total_chars": total_chars,
             "user_chars": user_chars,
+            "raw_user_prompt_chars": len(user_prompt),
+            "routing_focus_extracted": focus_text != user_prompt,
             "system_chars": system_chars,
             "marker_counts": marker_counts,
             "capability": capability,
             "multimodal": multimodal,
         },
     )
+
+
+def routing_focus_text(user_prompt: str) -> str:
+    """Extract the active user task from a structured agent prompt wrapper."""
+
+    for prefix in _ROUTING_FOCUS_PREFIXES:
+        start = user_prompt.find(prefix)
+        if start < 0:
+            continue
+        start += len(prefix)
+        end_candidates = [
+            position
+            for suffix in _ROUTING_FOCUS_SUFFIXES
+            if (position := user_prompt.find(suffix, start)) >= 0
+        ]
+        end = min(end_candidates) if end_candidates else len(user_prompt)
+        focused = user_prompt[start:end].strip()
+        if focused:
+            return focused
+    return user_prompt
 
 
 class NeuralRouteModel:

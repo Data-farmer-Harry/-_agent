@@ -190,6 +190,7 @@ class LLMClient:
             "attempted_models": attempted_models,
             "retry_budget": settings.llm_request_max_retries,
             "learned_policy_reasons": [reason for reason in decision.reasons if reason.startswith("learned_")],
+            "policy_metadata": decision.policy_metadata,
             "route": {
                 "model": route_payload.get("model"),
                 "api_base_url": route_payload.get("api_base_url"),

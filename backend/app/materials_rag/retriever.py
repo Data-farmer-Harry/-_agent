@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from app.config import settings
 from app.core.bm25 import BM25Index, build_bm25_index, score_bm25
 from app.materials_rag.document_store import load_materials_rag_documents
+from app.materials_rag.graph import build_graph_evidence
 from app.materials_rag.models import MaterialsRagDocument, MaterialsRagHit, MaterialsRagQuery
 from app.materials_rag.normalizer import canonical_terms, extract_materials, normalize_material, normalize_text, tokenize_text
 from app.materials_rag.vector import build_embedding_with_backend, build_embeddings, effective_embedding_backend, embedding_signature
 from app.rag.query_rewrite import rewrite_materials_query
-from app.rag.reranker import rerank_texts
+from app.rag.reranker import RerankItem, rerank_texts
+from app.rag.uncertainty import estimate_retrieval_uncertainty
 from app.rag.sqlite_vector_store import content_digest, get_vector_store
 
 
@@ -31,6 +33,14 @@ class _IndexedDocument:
 _INDEX_CACHE_KEY: tuple[object, ...] | None = None
 _INDEX_CACHE_DOCUMENTS: tuple[_IndexedDocument, ...] = ()
 _INDEX_CACHE_BM25: BM25Index | None = None
+_HIGH_PRECISION_LAMMPS_ERROR_ANCHORS = (
+    "lost atoms",
+    "bond atoms missing",
+    "shake atoms missing",
+    "out of range atoms",
+    "non-numeric pressure",
+    "illegal command",
+)
 
 
 def _document_cache_fingerprint(documents: tuple[MaterialsRagDocument, ...]) -> tuple[tuple[str, str, str], ...]:
@@ -95,30 +105,32 @@ def _build_index_with_bm25() -> tuple[tuple[_IndexedDocument, ...], BM25Index]:
     store = get_vector_store()
     preferred_backend = effective_embedding_backend()
     preferred_signature = embedding_signature(preferred_backend)
-    store_current = preferred_backend != "disabled" and store.collection_is_current(
+    reusable_status = store.reusable_collection_status(
         "materials_rag",
-        embedding_signature=preferred_signature,
         content_digest_value=digest,
         document_ids=document_ids,
     )
-    cache_key = (
-        _document_cache_fingerprint(documents),
-        preferred_signature,
-        str(store.path),
-        store_current,
-    )
-    if _INDEX_CACHE_KEY == cache_key and _INDEX_CACHE_BM25 is not None:
-        return _INDEX_CACHE_DOCUMENTS, _INDEX_CACHE_BM25
+    store_current = reusable_status is not None
 
     embedding_backend = preferred_backend
     actual_signature = preferred_signature
-    if store_current:
-        status = store.collection_status("materials_rag")
-        if status is not None:
-            embedding_backend = status.embedding_backend
-            actual_signature = status.embedding_signature
+    if reusable_status is not None:
+        if preferred_backend == "disabled":
+            embedding_backend = "disabled"
+        elif reusable_status.embedding_signature == preferred_signature or reusable_status.embedding_backend == "local_hash":
+            embedding_backend = reusable_status.embedding_backend
+            actual_signature = reusable_status.embedding_signature
+        else:
+            # A dense vector must be queried with the same model/signature that
+            # created it. Keep BM25/lexical retrieval available and wait for an
+            # explicit offline rebuild instead of mixing incompatible vectors.
+            embedding_backend = "disabled"
     elif preferred_backend != "disabled":
-        vectors, embedding_backend = build_embeddings(embedding_texts, backend=preferred_backend)
+        # Never build a remote corpus index inside an interactive request. A
+        # local hash index is deterministic and fast enough for cold-start;
+        # remote embedding upgrades belong to the explicit reindex command.
+        online_build_backend = preferred_backend if preferred_backend == "local_hash" else "local_hash"
+        vectors, embedding_backend = build_embeddings(embedding_texts, backend=online_build_backend)
         actual_signature = embedding_signature(embedding_backend)
         if vectors and all(vector for vector in vectors):
             store.replace_collection(
@@ -131,10 +143,12 @@ def _build_index_with_bm25() -> tuple[tuple[_IndexedDocument, ...], BM25Index]:
             store_current = True
     cache_key = (
         _document_cache_fingerprint(documents),
-        actual_signature,
+        actual_signature if embedding_backend != "disabled" else f"sparse:{preferred_signature}",
         str(store.path),
         store_current,
     )
+    if _INDEX_CACHE_KEY == cache_key and _INDEX_CACHE_BM25 is not None:
+        return _INDEX_CACHE_DOCUMENTS, _INDEX_CACHE_BM25
     indexed: list[_IndexedDocument] = []
     for document, embedding_text in zip(documents, embedding_texts):
         keyword_terms: list[str] = []
@@ -191,6 +205,25 @@ def _domain_allowed(document: MaterialsRagDocument, domain_filter: str) -> tuple
     return False, False
 
 
+def _use_high_precision_lexical_shortcut(
+    *,
+    search_text: str,
+    domain_filter: str,
+    doc_type_filter: str,
+) -> bool:
+    """Skip a remote query embedding only for exact structured error IDs.
+
+    This is a precision gate, not a replacement for hybrid retrieval. Fuzzy
+    materials questions still use dense vectors; exact LAMMPS error strings
+    are already uniquely represented by title/keyword/BM25 fields.
+    """
+
+    if domain_filter != "lammps" or doc_type_filter != "error_cookbook":
+        return False
+    lowered = " ".join(search_text.casefold().split())
+    return any(anchor in lowered for anchor in _HIGH_PRECISION_LAMMPS_ERROR_ANCHORS)
+
+
 def search_materials_rag(query: MaterialsRagQuery) -> tuple[MaterialsRagHit, ...]:
     if not settings.materials_rag_enabled:
         return tuple()
@@ -210,7 +243,19 @@ def search_materials_rag(query: MaterialsRagQuery) -> tuple[MaterialsRagHit, ...
     domain_filter = (query.domain or "").strip().lower()
     doc_type_filter = (query.doc_type or "").strip().lower()
     material_filter = normalize_material(query.material)
-    query_vector, query_embedding_backend = build_embedding_with_backend(search_text)
+    indexed_embedding_backend = indexed_documents[0].embedding_backend if indexed_documents else "disabled"
+    lexical_shortcut = _use_high_precision_lexical_shortcut(
+        search_text=search_text,
+        domain_filter=domain_filter,
+        doc_type_filter=doc_type_filter,
+    )
+    if lexical_shortcut:
+        query_vector, query_embedding_backend = tuple(), "lexical_shortcut"
+    else:
+        query_vector, query_embedding_backend = build_embedding_with_backend(
+            search_text,
+            backend=indexed_embedding_backend,
+        )
     query_bm25_tokens = _bm25_tokens_for_query(query, search_text=search_text)
     vector_scores: dict[str, float] = {}
     if query_vector and indexed_documents and query_embedding_backend == indexed_documents[0].embedding_backend:
@@ -298,23 +343,53 @@ def search_materials_rag(query: MaterialsRagQuery) -> tuple[MaterialsRagHit, ...
                 lexical_score=round(lexical_score, 3),
                 bm25_score=round(bm25_score, 3),
                 vector_score=round(vector_similarity, 3),
-                embedding_backend=indexed.embedding_backend,
+                embedding_backend=("lexical_shortcut" if lexical_shortcut else indexed.embedding_backend),
                 matched_fields=list(dict.fromkeys(matched_fields)),
             )
         )
 
+    hits.sort(key=lambda item: (-item.score, item.document.title.lower(), item.document.id))
+    graph_evidence = build_graph_evidence(
+        search_text,
+        [item.document for item in indexed_documents],
+        hits[:5],
+    )
+    hits = [
+        hit.model_copy(
+            update={
+                "score": round(hit.score + 0.35 * graph_evidence[hit.document.id].score, 3),
+                "graph_score": graph_evidence[hit.document.id].score,
+                "graph_paths": list(graph_evidence[hit.document.id].paths),
+                "graph_community": graph_evidence[hit.document.id].community,
+                "matched_fields": list(dict.fromkeys([*hit.matched_fields, *(["knowledge_graph"] if graph_evidence[hit.document.id].score > 0 else [])])),
+            }
+        )
+        for hit in hits
+    ]
     hits.sort(key=lambda item: (-item.score, item.document.title.lower(), item.document.id))
     final_limit = max(1, query.top_k)
     pool_limit = final_limit
     if settings.rag_reranker_enabled:
         pool_limit = max(final_limit, max(2, settings.rag_reranker_candidate_pool))
     pool = hits[:pool_limit]
-    rerank = rerank_texts(
-        query_rewrite.rerank_query,
-        [_embedding_text(hit.document) for hit in pool],
+    pre_rerank_uncertainty = estimate_retrieval_uncertainty(pool)
+    should_rerank = (
+        settings.rag_reranker_enabled
+        and not lexical_shortcut
+        and len(pool) >= 2
+        and pre_rerank_uncertainty.action != "answer"
+    )
+    rerank = (
+        rerank_texts(
+            query_rewrite.rerank_query,
+            [_embedding_text(hit.document) for hit in pool],
+        )
+        if should_rerank
+        else None
     )
     output: list[MaterialsRagHit] = []
-    for item in rerank.items[:final_limit]:
+    rerank_items = rerank.items if rerank is not None else tuple(RerankItem(index=index) for index in range(len(pool)))
+    for item in rerank_items[:final_limit]:
         hit = pool[item.index]
         output.append(
             hit.model_copy(
@@ -323,7 +398,7 @@ def search_materials_rag(query: MaterialsRagQuery) -> tuple[MaterialsRagHit, ...
                     "rerank_score": (
                         round(item.relevance_score, 6) if item.relevance_score is not None else None
                     ),
-                    "reranker_backend": rerank.backend,
+                    "reranker_backend": rerank.backend if rerank is not None else "adaptive_skip",
                     "original_rank": item.index + 1,
                 }
             )

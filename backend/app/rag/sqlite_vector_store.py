@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -115,8 +116,61 @@ class SqliteVectorStore:
             );
             CREATE INDEX IF NOT EXISTS idx_rag_vector_documents_id
                 ON rag_vector_documents(collection, document_id);
+            CREATE TABLE IF NOT EXISTS rag_query_embedding_cache (
+                embedding_signature TEXT NOT NULL,
+                query_hash TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                vector_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (embedding_signature, query_hash)
+            );
             """
         )
+
+    def get_cached_query_embedding(self, *, embedding_signature: str, text: str) -> tuple[float, ...] | None:
+        query_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with _STORE_LOCK, self._connection() as connection:
+            row = connection.execute(
+                "SELECT dimensions, vector_json FROM rag_query_embedding_cache "
+                "WHERE embedding_signature = ? AND query_hash = ?",
+                (embedding_signature, query_hash),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            values = tuple(float(item) for item in json.loads(str(row["vector_json"])))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return values if len(values) == int(row["dimensions"]) else None
+
+    def cache_query_embedding(
+        self,
+        *,
+        embedding_signature: str,
+        text: str,
+        vector: Sequence[float],
+        max_entries: int = 512,
+    ) -> None:
+        values = tuple(float(item) for item in vector)
+        if not values:
+            return
+        query_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with _STORE_LOCK, self._connection() as connection:
+            connection.execute(
+                "INSERT INTO rag_query_embedding_cache(embedding_signature, query_hash, dimensions, vector_json, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(embedding_signature, query_hash) DO UPDATE SET "
+                "dimensions=excluded.dimensions, vector_json=excluded.vector_json, updated_at=excluded.updated_at",
+                (embedding_signature, query_hash, len(values), json.dumps(values, separators=(",", ":")), updated_at),
+            )
+            connection.execute(
+                "DELETE FROM rag_query_embedding_cache WHERE rowid IN ("
+                "SELECT rowid FROM rag_query_embedding_cache ORDER BY updated_at DESC LIMIT -1 OFFSET ?"
+                ")",
+                (max(32, max_entries),),
+            )
+            connection.commit()
 
     @staticmethod
     def _status_from_row(row: sqlite3.Row | None) -> VectorCollectionStatus | None:
@@ -149,6 +203,27 @@ class SqliteVectorStore:
         content_digest_value: str,
         document_ids: Sequence[str],
     ) -> bool:
+        status = self.reusable_collection_status(
+            collection,
+            content_digest_value=content_digest_value,
+            document_ids=document_ids,
+        )
+        return status is not None and status.embedding_signature == embedding_signature
+
+    def reusable_collection_status(
+        self,
+        collection: str,
+        *,
+        content_digest_value: str,
+        document_ids: Sequence[str],
+    ) -> VectorCollectionStatus | None:
+        """Return a structurally valid collection for the current documents.
+
+        Embedding configuration changes do not invalidate the document corpus.
+        Callers may reuse a compatible stored backend immediately and schedule
+        an explicit rebuild separately instead of blocking an online request.
+        """
+
         with _STORE_LOCK, self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM rag_vector_collections WHERE collection = ?",
@@ -156,19 +231,18 @@ class SqliteVectorStore:
             ).fetchone()
             status = self._status_from_row(row)
             if status is None:
-                return False
+                return None
             if (
-                status.embedding_signature != embedding_signature
-                or status.content_digest != content_digest_value
+                status.content_digest != content_digest_value
                 or status.document_count != len(document_ids)
             ):
-                return False
+                return None
             table_exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 (status.table_name,),
             ).fetchone()
             if table_exists is None:
-                return False
+                return None
             stored_ids = [
                 str(item["document_id"])
                 for item in connection.execute(
@@ -176,7 +250,7 @@ class SqliteVectorStore:
                     (collection,),
                 ).fetchall()
             ]
-            return stored_ids == list(document_ids)
+            return status if stored_ids == list(document_ids) else None
 
     def replace_collection(
         self,

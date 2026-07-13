@@ -27,6 +27,14 @@ ID_TO_LABEL = {index: label for label, index in LABEL_TO_ID.items()}
 FEATURE_NAMES = feature_names()
 
 
+def _portable_path(path: str | Path) -> str:
+    candidate = Path(path)
+    try:
+        return candidate.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        return candidate.as_posix()
+
+
 def build_synthetic_route_dataset(
     samples_per_class: int = 800,
     seed: int = 20260710,
@@ -40,6 +48,7 @@ def build_synthetic_route_dataset(
             rows.append(_sample_case(label=label, case_index=case_index, rng=rng))
     if include_challenge_cases:
         rows.extend(build_route_challenge_cases(seed=seed + 17, repeats=max(2, samples_per_class // 120)))
+        rows.extend(build_deployment_wrapper_cases(seed=seed + 29, repeats=max(8, samples_per_class // 40)))
     rng.shuffle(rows)
     return rows
 
@@ -227,32 +236,33 @@ def write_experiment_outputs(
     metrics: dict[str, object],
     splits: dict[str, list[dict[str, object]]],
     output_dir: Path,
+    write_splits: bool = False,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / "model.json"
     metrics_path = output_dir / "metrics.json"
     report_path = output_dir / "report.md"
-    train_path = output_dir / "train.jsonl"
-    test_path = output_dir / "test.jsonl"
-    probe_path = output_dir / "probe.jsonl"
 
     model.save(model_path)
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    report_path.write_text(render_metrics_markdown(metrics, model_path=model_path), encoding="utf-8")
-    _write_jsonl(train_path, splits["train"])
-    _write_jsonl(test_path, splits["test"])
-    _write_jsonl(probe_path, splits["probe"])
-    return {
+    report_path.write_text(render_metrics_markdown(metrics, model_path=_portable_path(model_path)), encoding="utf-8")
+    outputs = {
         "model": str(model_path),
         "metrics": str(metrics_path),
         "report": str(report_path),
-        "train": str(train_path),
-        "test": str(test_path),
-        "probe": str(probe_path),
     }
+    if write_splits:
+        train_path = output_dir / "train.jsonl"
+        test_path = output_dir / "test.jsonl"
+        probe_path = output_dir / "probe.jsonl"
+        _write_jsonl(train_path, splits["train"])
+        _write_jsonl(test_path, splits["test"])
+        _write_jsonl(probe_path, splits["probe"])
+        outputs.update({"train": str(train_path), "test": str(test_path), "probe": str(probe_path)})
+    return outputs
 
 
-def render_metrics_markdown(metrics: dict[str, object], *, model_path: Path) -> str:
+def render_metrics_markdown(metrics: dict[str, object], *, model_path: str | Path) -> str:
     test = metrics["test"]  # type: ignore[index]
     train = metrics["train"]  # type: ignore[index]
     metadata = metrics["metadata"]  # type: ignore[index]
@@ -297,12 +307,13 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=48)
     parser.add_argument("--learning-rate", type=float, default=0.028)
     parser.add_argument("--seed", type=int, default=20260710)
-    parser.add_argument("--output-dir", type=Path, default=BACKEND_ROOT / "outputs" / "llm_route_mlp")
+    parser.add_argument("--output-dir", type=Path, default=BACKEND_ROOT / "models" / "llm_route_mlp")
     parser.add_argument("--include-telemetry", action="store_true", help="Mix privacy-safe real LLM routing telemetry into training.")
     parser.add_argument("--telemetry-only", action="store_true", help="Train only from telemetry rows; useful once enough real data exists.")
     parser.add_argument("--telemetry-path", type=Path, default=BACKEND_ROOT / "outputs" / "logs" / "events.jsonl")
     parser.add_argument("--telemetry-max-rows", type=int, default=2500)
     parser.add_argument("--include-failed-telemetry", action="store_true", help="Include failed LLM calls as noisy observed labels.")
+    parser.add_argument("--write-splits", action="store_true", help="Persist reproducible train/test/probe JSONL files for audit.")
     args = parser.parse_args()
 
     telemetry_rows = (
@@ -330,9 +341,15 @@ def main() -> None:
     )
     metrics["metadata"]["synthetic_samples"] = len(synthetic_rows)
     metrics["metadata"]["telemetry_samples"] = len(telemetry_rows)
-    metrics["metadata"]["telemetry_path"] = str(args.telemetry_path)
+    metrics["metadata"]["telemetry_path"] = _portable_path(args.telemetry_path)
     model.metadata.update(metrics["metadata"])  # keep model.json metadata aligned with metrics.json.
-    outputs = write_experiment_outputs(model=model, metrics=metrics, splits=splits, output_dir=args.output_dir)
+    outputs = write_experiment_outputs(
+        model=model,
+        metrics=metrics,
+        splits=splits,
+        output_dir=args.output_dir,
+        write_splits=args.write_splits,
+    )
     print(
         json.dumps(
             {
@@ -630,7 +647,53 @@ def build_route_challenge_cases(seed: int = 20260727, repeats: int = 6) -> list[
     return rows
 
 
+def build_deployment_wrapper_cases(seed: int = 20260739, repeats: int = 20) -> list[dict[str, object]]:
+    """Model the real ChatAgent envelope without letting envelope noise win.
+
+    Production prompts carry memory, tool, RAG, and history sections. The MLP
+    should route on the active user message while still seeing total-context
+    load. These cases cover both short and long envelopes for every tier.
+    """
+
+    rng = np.random.default_rng(seed)
+    templates = (
+        ("fast", "它和包晶反应有什么区别？请简洁回答。", "chat.answer", 700, False),
+        ("balanced", "Fe-C 共析点是什么？请结合知识库依据和引用回答。", "rag.answer", 1200, False),
+        ("strong", "LAMMPS NPT 运行失败，请修复 input 并验证物理约束。", "lammps.repair", 1600, False),
+        ("vision", "请识别上传的相图截图。data:image/png;base64,...", "recognition.analyze", 1600, True),
+    )
+    rows: list[dict[str, object]] = []
+    for repeat in range(repeats):
+        context_words = int(rng.integers(180, 1100))
+        noisy_context = _filler(rng, context_words)
+        for label, message, capability, max_tokens, multimodal in templates:
+            wrapped = (
+                f"User message:\n{message}\n\n"
+                f"Current summary:\n{noisy_context}\n\n"
+                f"Retrieved long-term memory:\nRAG JSON code LAMMPS image_url {noisy_context}\n\n"
+                "Shared memory context:\n{}\n\n"
+                "Selected skill guidance:\n(none)\n\n"
+                "Tool results from this turn:\n(none)\n\n"
+                "Conversation history:\n[]"
+            )
+            rows.append(
+                _probe(
+                    f"deployment_wrapper.{label}.{repeat:03d}",
+                    label,
+                    "Answer the active task and respect supplied context boundaries.",
+                    wrapped,
+                    max_tokens,
+                    0.1,
+                    capability,
+                    multimodal,
+                    difficulty="deployment_wrapper",
+                )
+            )
+    return rows
+
+
 def build_route_probe_cases() -> list[dict[str, object]]:
+    wrapper_noise = "RAG JSON code LAMMPS image_url memory tool result historical noise. " * 70
     return [
         _probe("probe.fast.short_chat", "fast", "Answer briefly.", "你好，请用一句话介绍这个系统。", 250, 0.1, "chat", False),
         _probe("probe.fast.memory", "fast", "Compress memory.", "把这轮对话压缩成 120 字长期记忆。", 180, 0.1, "memory.summary", False),
@@ -642,6 +705,16 @@ def build_route_probe_cases() -> list[dict[str, object]]:
         _probe("probe.fast.filename_image", "fast", "Answer briefly.", "文件名叫 phase_image.png，但我没上传图片，只想问这个文件名是什么意思。", 300, 0.1, "chat", False),
         _probe("probe.fast.prompt_with_rag_noise", "fast", "Suggest prompt.", "给我一个下一步追问，历史里出现 RAG/citation/benchmark 但当前不要检索。", 260, 0.35, "prompt.suggest", False),
         _probe("probe.fast_short_json_definition", "fast", "Explain simply.", "JSON schema 是什么？一句话解释，不要返回 JSON。", 260, 0.1, "chat", False),
+        _probe(
+            "probe.fast.production_wrapper",
+            "fast",
+            "Answer the active task.",
+            f"User message:\n它和包晶反应有什么区别？\n\nCurrent summary:\n{wrapper_noise}\n\nTool results from this turn:\n(none)\n\nConversation history:\n[]",
+            700,
+            0.2,
+            "chat.answer",
+            False,
+        ),
         _probe("probe.balanced.router", "balanced", "Route safely.", "Choose exactly one route_name and return JSON schema.", 900, 0.1, "supervisor.router", False),
         _probe("probe.balanced.rag", "balanced", "Rewrite query.", "请做 query rewrite，结合 RAG retrieval 和 citation。", 800, 0.1, "rag.query_rewrite", False),
         _probe("probe.balanced.literature", "balanced", "Evidence summary.", "整理 literature citation 和 benchmark evidence。", 1300, 0.1, "literature.citation", False),
@@ -652,6 +725,16 @@ def build_route_probe_cases() -> list[dict[str, object]]:
         _probe("probe.balanced.mixed_route", "balanced", "Choose route.", "用户可能要 conversation.answer、lammps.generate 或 recognition.analyze，请只返回 route JSON。", 1050, 0.1, "supervisor.router", False),
         _probe("probe.balanced_benchmark_metrics", "balanced", "Evaluate benchmark metadata.", "计算 benchmark 指标定义：Hit@k、citation coverage、macro-F1，不调用 judge。", 1500, 0.1, "benchmark.evaluate", False),
         _probe("probe.balanced_phase_query", "balanced", "Rewrite query.", "为 pycalphad TDB 相图资料生成检索 query，不写 Python wrapper。", 900, 0.1, "rag.query_rewrite", False),
+        _probe(
+            "probe.balanced.production_rag_wrapper",
+            "balanced",
+            "Ground the active task.",
+            f"User message:\nFe-C 共析点是什么？请结合知识库依据回答。\n\nCurrent summary:\n{wrapper_noise}\n\nMaterials RAG context:\nretrieved evidence",
+            1200,
+            0.1,
+            "rag.answer",
+            False,
+        ),
         _probe("probe.strong.short_lammps", "strong", "Answer or route safely.", "LAMMPS Cu EAM NPT failed. Use MODIFY and VERIFY patch.", 900, 0.1, "lammps.review", False),
         _probe("probe.strong.repair", "strong", "Repair safely.", "Fix LAMMPS input script after execution error and check thermo.csv.", 1200, 0.1, "lammps.repair", False),
         _probe("probe.strong.codegen", "strong", "Return runnable Python code only.", "生成 pycalphad TDB phase diagram wrapper code。", 1800, 0.1, "phase.codegen", False),

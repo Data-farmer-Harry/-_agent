@@ -33,7 +33,8 @@ from tests.support import MINI_PNG_DATA_URL, ScriptedLLMClient, build_request
 
 class SupervisorAndChatUnitTests(unittest.TestCase):
     def test_supervisor_routes_plain_question_to_chat(self) -> None:
-        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        llm = ScriptedLLMClient()
+        supervisor = SupervisorAgent(llm_client=llm)
         state: AgentGraphState = {
             "request": build_request("什么是共析点，它和包晶反应有什么区别？"),
             "messages": [],
@@ -45,6 +46,34 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         decision = supervisor.decide(state)
 
         self.assertEqual(decision["route_name"], "conversation.answer")
+        self.assertEqual(decision["source"], "heuristic_supervisor")
+        self.assertEqual(llm.calls, [])
+        audit = decision["supervisor_audit"]
+        self.assertTrue(audit["passed"])
+        self.assertFalse(audit["requires_llm_review"])
+        self.assertGreater(audit["confidence_margin"], 0.18)
+        self.assertEqual(audit["confidence_formula"]["source"], "deterministic_supervisor_v2")
+        self.assertFalse(audit["confidence_formula"]["llm_confidence_used"])
+        self.assertEqual(
+            audit["dag"]["topological_order"],
+            ["signal_extract", "candidate_score", "asset_prerequisite", "compute_prerequisite", "route_contract", "commit_route"],
+        )
+
+    def test_supervisor_treats_phase_diagram_concept_question_as_chat(self) -> None:
+        llm = ScriptedLLMClient()
+        supervisor = SupervisorAgent(llm_client=llm)
+        state: AgentGraphState = {
+            "request": build_request("Fe-C 相图中的共析点是什么？请给出知识库依据。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "conversation.answer")
+        self.assertEqual(llm.calls, [])
 
     def test_supervisor_routes_image_plus_generate_to_mixed(self) -> None:
         supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
@@ -326,6 +355,7 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertIn("material", decision["clarification_slots"])
         self.assertIn("temperature", decision["clarification_slots"])
         self.assertIn("steps", decision["clarification_slots"])
+        self.assertFalse(decision["supervisor_audit"]["requires_llm_review"])
 
     def test_supervisor_routes_complete_lammps_request_to_runtime(self) -> None:
         supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
@@ -342,6 +372,96 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertEqual(decision["route_name"], "lammps.generate")
         self.assertEqual(decision["compute_domain"], "lammps")
         self.assertEqual(decision["intent"], "run_lammps_simulation")
+
+    def test_supervisor_uses_ambiguous_fallback_for_phase_and_lammps_overlap(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("请同时用 LAMMPS 模拟 Al 并生成 Al-Zn 相图。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "conversation.answer")
+        self.assertEqual(decision["intent"], "clarify_ambiguous_request")
+        self.assertTrue(decision["supervisor_audit"]["llm_reviewed"])
+        self.assertFalse(decision["supervisor_audit"]["requires_llm_review"])
+
+    def test_supervisor_uses_llm_and_dag_fallback_for_missing_phase_system(self) -> None:
+        llm = ScriptedLLMClient()
+        supervisor = SupervisorAgent(llm_client=llm)
+        state: AgentGraphState = {
+            "request": build_request("请生成一张相图。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertTrue(any(call["method"] == "chat_json" for call in llm.calls))
+        self.assertEqual(decision["route_name"], "conversation.answer")
+        self.assertEqual(decision["intent"], "clarify_phase_request")
+        self.assertEqual(decision["source"], "supervisor_dag_fallback")
+        self.assertTrue(decision["supervisor_audit"]["llm_reviewed"])
+        self.assertIn("compute_prerequisite", decision["supervisor_audit"]["rejected_failures"])
+
+    def test_supervisor_confidence_ignores_model_self_reported_score(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("请用 LAMMPS 做 Cu heating，800K，4000 steps，NVT，EAM 势函数。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+        low = supervisor._supervisor_audit(
+            state,
+            {
+                "route_name": "lammps.generate",
+                "next_step": "compute",
+                "compute_domain": "lammps",
+                "confidence": 0.01,
+            },
+        )
+        high = supervisor._supervisor_audit(
+            state,
+            {
+                "route_name": "lammps.generate",
+                "next_step": "compute",
+                "compute_domain": "lammps",
+                "confidence": 0.99,
+            },
+        )
+
+        self.assertEqual(low["calibrated_confidence"], high["calibrated_confidence"])
+        self.assertGreater(low["calibrated_confidence"], 0.78)
+        self.assertFalse(low["confidence_formula"]["llm_confidence_used"])
+
+    def test_chat_agent_returns_phase_clarification_from_dag_fallback(self) -> None:
+        llm = ScriptedLLMClient()
+        agent = ChatAgent(llm_client=llm)
+        state: AgentGraphState = {
+            "request": build_request("请生成一张相图。"),
+            "messages": [],
+            "last_run_context": LastRunContext(),
+            "supervisor_decision": {
+                "route_name": "conversation.answer",
+                "intent": "clarify_phase_request",
+            },
+            "current_context_summary": "",
+        }
+
+        result = agent.run(state)
+
+        self.assertIn("材料体系", result["final_answer"])
+        self.assertIn("Al-Zn", result["final_answer"])
+        self.assertEqual(result["response_metadata"]["materials_rag"]["gate_reason"], "contextual_follow_up")
+        self.assertEqual(llm.calls, [])
 
     def test_chat_agent_returns_lammps_clarification_from_supervisor_decision(self) -> None:
         agent = ChatAgent(llm_client=ScriptedLLMClient())
@@ -450,12 +570,14 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
             "current_context_summary": "",
         }
 
-        agent.run(state)
+        result = agent.run(state)
 
         last_call = llm.calls[-1]
         self.assertEqual(last_call["method"], "chat_text")
+        self.assertEqual(last_call["max_tokens"], 800)
         self.assertIn("Do not invent browsing", last_call["system_prompt"])
         self.assertIn("Do not describe yourself as a generic internet-enabled assistant", last_call["system_prompt"])
+        self.assertEqual(result["response_metadata"]["chat_prompt_mode"], "lean_direct")
 
     def test_chat_agent_reconstructs_previous_phase_result_via_internal_image_recognition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -604,7 +726,7 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
 
     def test_phase_request_parser_keeps_explicit_user_temperature_range_when_llm_drifts(self) -> None:
         class DriftingPhaseLLM(ScriptedLLMClient):
-            def chat_json(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1):  # type: ignore[override]
+            def chat_json(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1, capability: str = ""):  # type: ignore[override]
                 payload = super().chat_json(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
@@ -641,7 +763,7 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
 
     def test_phase_request_parser_falls_back_when_llm_numeric_fields_are_invalid(self) -> None:
         class MalformedPhaseLLM(ScriptedLLMClient):
-            def chat_json(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1):  # type: ignore[override]
+            def chat_json(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1, capability: str = ""):  # type: ignore[override]
                 payload = super().chat_json(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
@@ -679,7 +801,7 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
 
     def test_phase_request_parser_tolerates_non_numeric_confidence(self) -> None:
         class MalformedConfidenceLLM(ScriptedLLMClient):
-            def chat_json(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1):  # type: ignore[override]
+            def chat_json(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1, capability: str = ""):  # type: ignore[override]
                 payload = super().chat_json(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,

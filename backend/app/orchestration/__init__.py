@@ -43,6 +43,15 @@ from app.orchestration.replan import (
     failure_signature,
     merge_failure_batch,
 )
+from app.orchestration.reward import (
+    PlanScore,
+    PlanSearchResult,
+    ProcessRewardModel,
+    ProcessRewardWeights,
+    StepReward,
+    build_plan_variants,
+    search_plans,
+)
 
 __all__ = [
     "CheckpointRecord",
@@ -86,4 +95,11 @@ __all__ = [
     "stable_json_dumps",
     "topological_sort",
     "validate_dag_plan",
+    "PlanScore",
+    "PlanSearchResult",
+    "ProcessRewardModel",
+    "ProcessRewardWeights",
+    "StepReward",
+    "build_plan_variants",
+    "search_plans",
 ]

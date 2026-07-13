@@ -94,7 +94,9 @@ def _rerank_remote_cached(
         },
         method="POST",
     )
-    timeout = max(3, min(settings.rag_reranker_timeout_seconds, 180))
+    # Reranking is optional: bound its latency aggressively and fall back to
+    # the already available hybrid ranking instead of blocking the whole turn.
+    timeout = max(3, min(settings.rag_reranker_timeout_seconds, 8))
     try:
         with urllib_request.urlopen(req, timeout=timeout) as response:
             parsed = json.loads(response.read().decode("utf-8"))
@@ -145,7 +147,7 @@ def rerank_texts(query: str, documents: list[str] | tuple[str, ...]) -> RerankRe
             used_remote=False,
         )
 
-    max_attempts = max(1, settings.llm_request_max_retries + 1)
+    max_attempts = 1
     last_error = ""
     for attempt in range(max_attempts):
         try:

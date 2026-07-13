@@ -51,9 +51,10 @@ QUICK_PYTEST_TARGETS := \
 	tests/test_effect_sizes.py \
 	tests/test_compare_versions.py \
 	tests/test_benchmark_gate.py \
-	tests/test_secret_scan.py
+	tests/test_secret_scan.py \
+	tests/test_advanced_learning_methods.py
 
-.PHONY: help test-quick test-backend-quick test-secret-scan test-dataset-validate test-materials-bench-freeze freeze-materials-agent-bench test-frontend-build test-full test-benchmark-gate audit-advanced-agent record-benchmark-baseline test-lammps-real test-orchestration test-live-backends test-live record-lammps-baseline clean-outputs-dry-run clean-local clean-local-with-node-modules
+.PHONY: help test-quick test-backend-quick test-secret-scan test-dataset-validate test-materials-bench-freeze freeze-materials-agent-bench test-frontend-build test-full test-benchmark-gate test-advanced-methods audit-advanced-agent record-benchmark-baseline test-lammps-real test-orchestration test-live-backends test-live record-lammps-baseline clean-outputs-dry-run clean-local clean-local-with-node-modules
 
 help:
 	@echo "Targets:"
@@ -63,6 +64,7 @@ help:
 	@echo "  make freeze-materials-agent-bench # rewrite MaterialsAgentBench freeze lock after intentional version bump"
 	@echo "  make test-full           # full backend pytest + deterministic benchmark run-all + frontend build"
 	@echo "  make test-benchmark-gate # run deterministic benchmark smoke gate and fail on threshold/baseline regressions"
+	@echo "  make test-advanced-methods # benchmark MLP/PRM/IR/GraphRAG uncertainty/multi-fidelity contracts"
 	@echo "  make audit-advanced-agent # audit roadmap, capability surface, deterministic report, and freeze locks"
 	@echo "  make record-benchmark-baseline # record current deterministic benchmark report as baseline"
 	@echo "  make test-lammps-real    # LAMMPS-focused benchmark suites with --real-lammps for nightly/local validation"
@@ -119,6 +121,9 @@ test-full:
 test-benchmark-gate:
 	cd $(BACKEND_DIR) && $(OFFLINE_TEST_ENV) $(PYTHON) benchmarks/run_benchmarks.py run-all $(if $(BENCHMARK_LIMIT),--limit $(BENCHMARK_LIMIT),) --output $(BENCHMARK_OUTPUT)
 	$(OFFLINE_TEST_ENV) $(PYTHON) scripts/benchmark_gate.py --report $(BENCHMARK_OUTPUT) $(if $(BENCHMARK_BASELINE),--baseline $(BENCHMARK_BASELINE),) --output-dir $(BENCHMARK_GATE_OUTPUT)
+
+test-advanced-methods:
+	cd $(BACKEND_DIR) && $(OFFLINE_TEST_ENV) $(PYTHON) benchmarks/advanced_methods_benchmark.py --output outputs/benchmarks/advanced_methods.json
 
 audit-advanced-agent:
 	$(OFFLINE_TEST_ENV) $(PYTHON) scripts/advanced_agent_audit.py

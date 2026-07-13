@@ -86,7 +86,15 @@ class ScriptedLLMClient:
             high += 273.15
         return low, high
 
-    def chat_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1) -> str:
+    def chat_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 1000,
+        temperature: float = 0.1,
+        capability: str = "",
+    ) -> str:
         self.calls.append(
             {
                 "method": "chat_text",
@@ -94,6 +102,7 @@ class ScriptedLLMClient:
                 "user_prompt": user_prompt,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "capability": capability,
             }
         )
         user_message = self._extract_user_message(user_prompt)
@@ -140,7 +149,15 @@ class ScriptedLLMClient:
             return "包晶反应指液相与一种固相在固定温度反应生成另一种固相。"
         return "当前处于对话模式。"
 
-    def chat_json(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = 0.1) -> dict[str, Any] | None:
+    def chat_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 1000,
+        temperature: float = 0.1,
+        capability: str = "",
+    ) -> dict[str, Any] | None:
         self.calls.append(
             {
                 "method": "chat_json",
@@ -148,6 +165,7 @@ class ScriptedLLMClient:
                 "user_prompt": user_prompt,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "capability": capability,
             }
         )
         user_message = self._extract_user_message(user_prompt)

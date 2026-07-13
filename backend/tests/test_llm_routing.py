@@ -71,6 +71,43 @@ class LLMRoutingTests(unittest.TestCase):
         self.assertEqual(decision.tier, "vision")
         self.assertIn("vision_or_multimodal", decision.reasons)
 
+    def test_router_does_not_infer_vision_from_generic_system_capability_text(self) -> None:
+        router = LLMRouter()
+
+        decision = router.decide(
+            system_prompt="The system can analyze image, vision, recognition, and multimodal inputs when supplied.",
+            user_prompt="你好，请用一句话介绍这个系统。当前没有上传图片。",
+            max_tokens=300,
+            temperature=0.1,
+            capability="chat",
+            multimodal=False,
+        )
+
+        self.assertEqual(decision.tier, "fast")
+        self.assertNotIn("vision_or_multimodal", decision.reasons)
+
+    def test_router_ignores_structured_context_headings_for_simple_chat_task(self) -> None:
+        router = LLMRouter()
+        wrapped_prompt = (
+            "User message:\n它和包晶反应有什么区别？\n\n"
+            "Current summary:\nPrevious RAG benchmark and code repair discussion.\n\n"
+            "Retrieved long-term memory:\nLAMMPS traceback, query rewrite, citation, JSON.\n\n"
+            "Tool results from this turn:\n(none)\n\n"
+            "Conversation history:\n[]"
+        )
+
+        decision = router.decide(
+            system_prompt="Answer clearly in Chinese and respect memory/tool boundaries.",
+            user_prompt=wrapped_prompt,
+            max_tokens=700,
+            temperature=0.2,
+            capability="chat",
+        )
+
+        self.assertEqual(decision.tier, "fast")
+        self.assertNotIn("code_or_repair", decision.reasons)
+        self.assertNotIn("research_or_evaluation", decision.reasons)
+
     def test_load_routing_config_from_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "llm_routing.json"

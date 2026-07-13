@@ -594,9 +594,14 @@ function attachAssetsToLatestUserMessage(
   return [...messages.slice(0, targetIndex), patchedMessage, ...messages.slice(targetIndex + 1)]
 }
 
-function buildStateFromConversationSnapshot(snapshot: ConversationSnapshotResponse): AgentChatState {
-  const latestResponse = snapshot.latest_run ? responseFromRunRecord(snapshot.latest_run) : null
-  const baseState = latestResponse ? applyAgentRunResponse(initialState, latestResponse) : { ...initialState, conversationId: snapshot.conversation_id }
+function buildStateFromConversationSnapshot(
+  snapshot: ConversationSnapshotResponse,
+  selectedResponse?: AgentRunResponse,
+): AgentChatState {
+  const latestResponse = selectedResponse ?? (snapshot.latest_run ? responseFromRunRecord(snapshot.latest_run) : null)
+  const baseState = latestResponse
+    ? applyAgentRunResponse(initialState, latestResponse)
+    : { ...initialState, conversationId: snapshot.conversation_id }
   let messages = snapshot.short_term.messages.map(buildConversationMessageFromTurn)
   messages = attachAssetsToLatestUserMessage(messages, snapshot.short_term.uploaded_assets || [])
   if (snapshot.short_term.recognition_result && !messages.some((message) => message.kind === 'recognition')) {
@@ -623,7 +628,7 @@ function buildStateFromConversationSnapshot(snapshot: ConversationSnapshotRespon
     finalMessage: latestResponse?.final_message || baseState.finalMessage,
     isLoading: false,
     status: 'completed',
-    statusMessage: messages.length ? '已恢复上一轮会话。' : '等待输入',
+    statusMessage: messages.length ? '已恢复完整会话历史。' : '等待输入',
   }
 }
 
@@ -669,7 +674,7 @@ function persistAgentState(state: AgentChatState): void {
   try {
     const payload: AgentChatState = {
       ...state,
-      messages: state.messages.slice(-40).map((message) => ({
+      messages: state.messages.slice(-200).map((message) => ({
         ...message,
         attachments: compactMessageAttachments(message.attachments),
       })),
@@ -1271,7 +1276,14 @@ export function useAgentChat(settings: ClientSettings) {
     async (runId: string) => {
       const record = await getRunSummary(settings, runId)
       const response = responseFromRunRecord(record)
-      dispatch({ type: 'run_loaded', response })
+      try {
+        const snapshot = await getConversationSnapshot(settings, record.conversation_id)
+        dispatch({ type: 'hydrate', state: buildStateFromConversationSnapshot(snapshot, response) })
+      } catch {
+        // Older runs may not have a memory snapshot. Preserve the legacy
+        // single-run fallback for those records.
+        dispatch({ type: 'run_loaded', response })
+      }
       if (responseCarriesRenderableArtifact(response) && hasHtmlArtifact(response)) {
         await loadResultHtml(response)
       }
@@ -1319,13 +1331,13 @@ export function useAgentChat(settings: ClientSettings) {
     }
     hasAttemptedServerRestoreRef.current = true
     const storedConversationId = readStoredConversationId()
-    if (!storedConversationId || state.messages.length > 0 || state.runId) {
+    if (!storedConversationId) {
       return
     }
     void restoreConversationFromServer(storedConversationId).catch(() => {
-      // ignore restore failures and keep local initial state
+      // Keep the locally persisted state when the backend is unavailable.
     })
-  }, [restoreConversationFromServer, state.messages.length, state.runId])
+  }, [restoreConversationFromServer])
 
   const liveProgress = useMemo<LiveProgressSnapshot | null>(() => {
     if (!state.isLoading) {

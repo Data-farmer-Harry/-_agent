@@ -548,6 +548,7 @@ class AgentGraphState(TypedDict, total=False):
     event_sink: Any
     request_id: str
     memory_snapshot: MemorySnapshot
+    long_term_memory_snapshot: LongTermMemorySnapshot
     long_term_memory_hits: list[str]
     shared_memory_context: dict[str, Any]
     shared_memory_events: list[dict[str, Any]]

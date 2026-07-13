@@ -6,10 +6,25 @@ from typing import Any
 
 from app.config import settings
 from app.core.llm import LLMClient, LLMRequiredError
+from app.orchestration import DAGNode, DAGPlan, DAGValidationError, validate_dag_plan
 from app.state import AgentGraphState, TaskRoute
 
 
 class SupervisorAgent:
+    ROUTE_CONTRACTS: dict[str, tuple[str, str]] = {
+        "conversation.answer": ("chat", "none"),
+        "recognition.analyze": ("recognition", "none"),
+        "phase_diagram.generate": ("compute", "phase_diagram"),
+        "lammps.generate": ("compute", "lammps"),
+        "mixed.request": ("recognition", "phase_diagram"),
+    }
+    LLM_REVIEW_CONFIDENCE_THRESHOLD = 0.78
+    CONFIDENCE_WEIGHTS: dict[str, float] = {
+        "route_evidence": 0.45,
+        "candidate_separation": 0.25,
+        "critical_checks": 0.20,
+        "advisory_checks": 0.10,
+    }
     GENERATE_VERBS = ("生成", "绘制", "画", "plot", "draw", "generate", "重画", "重生成", "重新生成", "计算")
     RECOGNITION_HINTS = ("识别", "解析", "recognize", "read this diagram", "根据截图", "上传截图", "from image", "截图")
     IMAGE_ANALYSIS_HINTS = ("相区", "关键点", "坐标轴", "phase field", "axis", "label", "eutectic", "共晶", "critical point")
@@ -89,10 +104,10 @@ class SupervisorAgent:
         )
         wants_generate = any(token in lowered for token in self.GENERATE_VERBS)
         if not wants_generate and mentions_phase_diagram:
-            wants_generate = (
-                any(token in lowered for token in ("温度", "temperature", "范围", "区间", "liquidus", "solidus"))
-                or system_detected
-            ) and any(token in message for token in ("请", "帮", "给我", "想要", "需要", "算", "计算", "做一张"))
+            wants_generate = any(
+                token in lowered or token in message
+                for token in ("做一张", "来一张", "相图计算", "相图绘制", "plot the phase diagram", "compute the phase diagram")
+            )
         wants_recognition = any(token in lowered for token in self.RECOGNITION_HINTS)
         if has_image and not wants_generate:
             wants_recognition = wants_recognition or any(token in lowered or token in message for token in self.IMAGE_ANALYSIS_HINTS)
@@ -212,30 +227,459 @@ class SupervisorAgent:
             intent = "answer_question"
             reason = "The user is asking for explanation or follow-up conversation without requesting a new computed artifact."
 
-        confidence = 0.7
-        if route_name == "conversation.answer" and intent == "clarify_lammps_request":
-            confidence = 0.52
-        if route_name == "phase_diagram.generate" and system_detected and wants_generate:
-            confidence = 0.86
-        if route_name == "mixed.request":
-            confidence = 0.82
-
         return {
             "route_name": route_name,
             "next_step": next_step,
             "compute_domain": compute_domain,
             "intent": intent,
             "reason": reason,
-            "confidence": confidence,
             "source": "heuristic_supervisor",
             "clarification_slots": lammps_missing_slots if intent == "clarify_lammps_request" else [],
         }
 
+    @classmethod
+    def _route_evidence(cls, state: AgentGraphState) -> tuple[dict[str, float], dict[str, list[dict[str, Any]]]]:
+        """Build route support from observable signals only.
+
+        The selected route and any LLM-reported confidence are intentionally
+        excluded. This prevents a route from making itself look more certain
+        merely because a heuristic or model selected it.
+        """
+
+        message = state["request"].message
+        lowered = message.lower()
+        assets = state.get("uploaded_assets", [])
+        has_image = any(asset.media_type.startswith("image/") for asset in assets)
+        recognition = state.get("recognition_result")
+        last_run = state.get("last_run_context")
+        has_recognition_context = bool(recognition and (recognition.system or recognition.raw_summary or recognition.labels))
+        has_phase_system = bool(
+            state["request"].system_name.strip()
+            or cls.SYSTEM_PATTERN.search(message)
+            or (recognition and recognition.system)
+            or (last_run and last_run.route_name == "phase_diagram.generate" and last_run.system_name)
+        )
+        mentions_phase = "相图" in message or "phase diagram" in lowered
+        mentions_lammps = any(token in lowered for token in cls.LAMMPS_CORE_HINTS) or any(
+            token in lowered for token in cls.LAMMPS_SOFT_HINTS
+        )
+        wants_generate = any(token in lowered for token in cls.GENERATE_VERBS)
+        wants_recognition = any(token in lowered for token in cls.RECOGNITION_HINTS)
+        wants_run = any(
+            token in message
+            for token in ("运行", "执行", "跑", "请用", "给我", "做一个", "做一轮", "模拟一下", "再跑")
+        )
+        wants_explain = any(token in lowered or token in message for token in (*cls.EXPLAIN_HINTS, *cls.LAMMPS_EXPLAIN_HINTS))
+        lammps_slots_complete = all(
+            pattern.search(message)
+            for pattern in (
+                cls.LAMMPS_MATERIAL_PATTERN,
+                cls.LAMMPS_TASK_PATTERN,
+                cls.LAMMPS_TEMPERATURE_PATTERN,
+                cls.LAMMPS_STEPS_PATTERN,
+            )
+        )
+
+        raw_scores = {
+            "conversation.answer": 0.24,
+            "recognition.analyze": 0.08,
+            "phase_diagram.generate": 0.08,
+            "lammps.generate": 0.08,
+            "mixed.request": 0.04,
+        }
+        evidence: dict[str, list[dict[str, Any]]] = {
+            route: [{"signal": "route_prior", "weight": weight}]
+            for route, weight in raw_scores.items()
+        }
+
+        def add(route: str, signal: str, weight: float) -> None:
+            raw_scores[route] += weight
+            evidence[route].append({"signal": signal, "weight": weight})
+
+        if wants_explain or message.rstrip().endswith(("?", "？")):
+            add("conversation.answer", "question_or_explanation", 0.65)
+        if not has_image and not wants_generate and not wants_recognition and not (mentions_lammps and wants_run):
+            add("conversation.answer", "direct_chat_default", 0.75)
+        if mentions_lammps and wants_explain and not wants_run:
+            add("conversation.answer", "lammps_explanation_without_execution", 0.70)
+        if last_run and last_run.run_id and any(token in message for token in cls.FOLLOW_UP_REFERENCES):
+            add("conversation.answer", "previous_run_follow_up", 0.45)
+        if mentions_lammps and wants_run and not lammps_slots_complete:
+            add("conversation.answer", "incomplete_lammps_slots_require_clarification", 1.50)
+        if mentions_phase and wants_generate and not has_phase_system:
+            add("conversation.answer", "missing_phase_system_requires_clarification", 1.10)
+        if wants_recognition and not has_image and not has_recognition_context:
+            add("conversation.answer", "missing_image_requires_clarification", 0.90)
+
+        if has_image:
+            add("recognition.analyze", "image_attached", 0.72)
+        if wants_recognition:
+            add("recognition.analyze", "recognition_intent", 0.50)
+
+        if mentions_phase and wants_generate:
+            add("phase_diagram.generate", "phase_generation_intent", 0.85)
+        if wants_generate and has_phase_system:
+            add("phase_diagram.generate", "phase_system_available", 0.35)
+        if wants_generate and has_recognition_context and not has_image:
+            add("phase_diagram.generate", "recognition_context_reusable", 0.40)
+
+        if mentions_lammps:
+            add("lammps.generate", "lammps_domain_signal", 0.45)
+        if mentions_lammps and wants_run:
+            add("lammps.generate", "execution_intent", 0.80)
+        if mentions_lammps and wants_run and lammps_slots_complete:
+            add("lammps.generate", "complete_execution_slots", 0.30)
+
+        if has_image and wants_generate:
+            add("mixed.request", "image_plus_generation", 1.20)
+        if has_image and wants_generate and wants_recognition:
+            add("mixed.request", "explicit_recognize_then_generate", 0.25)
+
+        total = sum(raw_scores.values()) or 1.0
+        probabilities = {route: round(score / total, 6) for route, score in raw_scores.items()}
+        return probabilities, {
+            route: [*items, {"signal": "raw_total", "weight": round(raw_scores[route], 6)}]
+            for route, items in evidence.items()
+        }
+
+    @classmethod
+    def _candidate_route_scores(cls, state: AgentGraphState, decision: dict[str, Any] | None = None) -> dict[str, float]:
+        del decision  # Kept for compatibility with older callers.
+        scores, _ = cls._route_evidence(state)
+        return scores
+
+    @classmethod
+    def _supervisor_audit(cls, state: AgentGraphState, decision: dict[str, Any]) -> dict[str, Any]:
+        route_name = str(decision.get("route_name") or "conversation.answer")
+        request = state["request"]
+        message = request.message
+        lowered = message.lower()
+        assets = state.get("uploaded_assets", [])
+        has_image = any(asset.media_type.startswith("image/") for asset in assets)
+        recognition = state.get("recognition_result")
+        last_run = state.get("last_run_context")
+        has_recognition_context = bool(recognition and (recognition.system or recognition.raw_summary or recognition.labels))
+        has_phase_system = bool(
+            request.system_name.strip()
+            or cls.SYSTEM_PATTERN.search(message)
+            or (recognition and recognition.system)
+            or (last_run and last_run.route_name == "phase_diagram.generate" and last_run.system_name)
+        )
+        recent_lammps = bool(last_run and last_run.route_name == "lammps.generate")
+
+        route_scores, route_evidence = cls._route_evidence(state)
+        ranked = sorted(route_scores.items(), key=lambda item: (-item[1], item[0]))
+        top_route, top_score = ranked[0]
+        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        margin = max(0.0, top_score - second_score)
+        selected_evidence_items = route_evidence.get(route_name, [])
+        selected_raw_score = next(
+            (float(item["weight"]) for item in selected_evidence_items if item.get("signal") == "raw_total"),
+            0.0,
+        )
+
+        expected_next, expected_domain = cls.ROUTE_CONTRACTS.get(route_name, ("", ""))
+        route_contract_ok = bool(expected_next) and (
+            str(decision.get("next_step") or "") == expected_next
+            and str(decision.get("compute_domain") or "none") == expected_domain
+        )
+        asset_ok = (
+            route_name not in {"recognition.analyze", "mixed.request"}
+            or (route_name == "recognition.analyze" and has_image)
+            or (route_name == "mixed.request" and (has_image or has_recognition_context))
+        )
+
+        missing_lammps_slots: list[str] = []
+        if route_name == "lammps.generate" and not recent_lammps:
+            if not cls.LAMMPS_MATERIAL_PATTERN.search(message):
+                missing_lammps_slots.append("material")
+            if not cls.LAMMPS_TASK_PATTERN.search(message):
+                missing_lammps_slots.append("task_type")
+            if not cls.LAMMPS_TEMPERATURE_PATTERN.search(message):
+                missing_lammps_slots.append("temperature")
+            if not cls.LAMMPS_STEPS_PATTERN.search(message):
+                missing_lammps_slots.append("steps")
+
+        compute_ok = True
+        compute_detail = "No compute prerequisite is required."
+        if route_name == "phase_diagram.generate":
+            compute_ok = has_phase_system
+            compute_detail = "A material system is available." if compute_ok else "A phase-diagram system is missing."
+        elif route_name == "lammps.generate":
+            compute_ok = not missing_lammps_slots
+            compute_detail = (
+                "LAMMPS execution slots are complete."
+                if compute_ok
+                else f"Missing LAMMPS slots: {', '.join(missing_lammps_slots)}."
+            )
+        elif route_name == "mixed.request":
+            compute_ok = has_image or has_recognition_context
+            compute_detail = "Recognition can provide the material system." if compute_ok else "Mixed execution lacks image context."
+
+        ambiguous_domains = ("相图" in message or "phase diagram" in lowered) and (
+            "lammps" in lowered or "分子动力学" in message
+        )
+        signal_aligned = route_name == top_route or margin < 0.12
+
+        plan = DAGPlan(
+            plan_id="supervisor-route-audit",
+            global_timeout_seconds=2.0,
+            nodes=[
+                DAGNode(node_id="signal_extract", node_type="supervisor_signal", critical=True),
+                DAGNode(node_id="candidate_score", node_type="supervisor_score", dependencies=["signal_extract"], critical=False),
+                DAGNode(node_id="asset_prerequisite", node_type="prerequisite", dependencies=["candidate_score"], critical=True),
+                DAGNode(node_id="compute_prerequisite", node_type="prerequisite", dependencies=["candidate_score"], critical=True),
+                DAGNode(
+                    node_id="route_contract",
+                    node_type="contract",
+                    dependencies=["asset_prerequisite", "compute_prerequisite"],
+                    critical=True,
+                ),
+                DAGNode(node_id="commit_route", node_type="commit", dependencies=["route_contract"], critical=True),
+            ],
+        )
+        dag_valid = True
+        dag_error = ""
+        dag_order: list[str] = []
+        try:
+            validate_dag_plan(plan)
+            dag_order = plan.topological_order()
+        except DAGValidationError as exc:
+            dag_valid = False
+            dag_error = str(exc)
+
+        checks = [
+            {
+                "node_id": "signal_extract",
+                "passed": bool(selected_evidence_items),
+                "critical": True,
+                "detail": f"Collected {max(0, len(selected_evidence_items) - 1)} deterministic signals for {route_name}.",
+            },
+            {
+                "node_id": "candidate_score",
+                "passed": signal_aligned,
+                "critical": False,
+                "detail": f"selected={route_name}, top={top_route}, probability_margin={margin:.3f}",
+            },
+            {
+                "node_id": "asset_prerequisite",
+                "passed": asset_ok,
+                "critical": True,
+                "detail": "Image/recognition context is available." if asset_ok else "Image input is required for this route.",
+            },
+            {
+                "node_id": "compute_prerequisite",
+                "passed": compute_ok,
+                "critical": True,
+                "detail": compute_detail,
+            },
+            {
+                "node_id": "route_contract",
+                "passed": route_contract_ok,
+                "critical": True,
+                "detail": f"expected next={expected_next}, domain={expected_domain}",
+            },
+            {
+                "node_id": "commit_route",
+                "passed": asset_ok and compute_ok and route_contract_ok and dag_valid,
+                "critical": True,
+                "detail": "All execution prerequisites permit route commit.",
+            },
+            {
+                "node_id": "domain_ambiguity",
+                "passed": not ambiguous_domains,
+                "critical": False,
+                "detail": "Phase-diagram and LAMMPS signals overlap." if ambiguous_domains else "No cross-domain conflict.",
+            },
+            {
+                "node_id": "dag_topology",
+                "passed": dag_valid,
+                "critical": True,
+                "detail": dag_error or "Supervisor audit DAG is acyclic and complete.",
+            },
+        ]
+        critical_failures = [
+            str(check["node_id"])
+            for check in checks
+            if bool(check["critical"]) and not bool(check["passed"])
+        ]
+        warning_nodes = [
+            str(check["node_id"])
+            for check in checks
+            if not bool(check["critical"]) and not bool(check["passed"])
+        ]
+        critical_checks = [check for check in checks if bool(check["critical"])]
+        advisory_checks = [check for check in checks if not bool(check["critical"])]
+        critical_pass_rate = sum(1 for check in critical_checks if check["passed"]) / max(1, len(critical_checks))
+        advisory_pass_rate = sum(1 for check in advisory_checks if check["passed"]) / max(1, len(advisory_checks))
+        route_evidence_strength = min(1.0, selected_raw_score / 1.25)
+        candidate_separation = (
+            max(0.0, top_score - second_score) / max(top_score, 1e-9)
+            if route_name == top_route
+            else 0.0
+        )
+        components = {
+            "route_evidence": round(route_evidence_strength, 6),
+            "candidate_separation": round(candidate_separation, 6),
+            "critical_checks": round(critical_pass_rate, 6),
+            "advisory_checks": round(advisory_pass_rate, 6),
+        }
+        calibrated_confidence = sum(cls.CONFIDENCE_WEIGHTS[name] * value for name, value in components.items())
+        applied_penalties: list[dict[str, Any]] = []
+        if critical_failures:
+            calibrated_confidence *= 0.55
+            applied_penalties.append({"reason": "critical_dag_failure", "operation": "multiply", "value": 0.55})
+        if ambiguous_domains:
+            calibrated_confidence -= 0.10
+            applied_penalties.append({"reason": "cross_domain_ambiguity", "operation": "subtract", "value": 0.10})
+        if not signal_aligned:
+            calibrated_confidence *= 0.70
+            applied_penalties.append({"reason": "selected_route_not_top_candidate", "operation": "multiply", "value": 0.70})
+        calibrated_confidence = round(max(0.0, min(calibrated_confidence, 1.0)), 6)
+        requires_review = bool(
+            critical_failures
+            or warning_nodes
+            or margin < 0.18
+            or calibrated_confidence < cls.LLM_REVIEW_CONFIDENCE_THRESHOLD
+        )
+        deterministic_slot_clarification = bool(
+            str(decision.get("intent") or "") == "clarify_lammps_request"
+            and decision.get("clarification_slots")
+            and not critical_failures
+        )
+        if deterministic_slot_clarification:
+            requires_review = False
+        return {
+            "schema_version": "supervisor-route-audit/v2",
+            "passed": not critical_failures,
+            "requires_llm_review": requires_review,
+            "review_triggered": requires_review,
+            "calibrated_confidence": calibrated_confidence,
+            "candidate_scores": route_scores,
+            "candidate_evidence": route_evidence,
+            "top_route": top_route,
+            "confidence_margin": round(margin, 6),
+            "confidence_formula": {
+                "source": "deterministic_supervisor_v2",
+                "llm_confidence_used": False,
+                "expression": "0.45*route_evidence + 0.25*candidate_separation + 0.20*critical_checks + 0.10*advisory_checks, then deterministic penalties",
+                "weights": cls.CONFIDENCE_WEIGHTS,
+                "components": components,
+                "penalties": applied_penalties,
+            },
+            "checks": checks,
+            "critical_failures": critical_failures,
+            "warning_nodes": warning_nodes,
+            "missing_lammps_slots": missing_lammps_slots,
+            "dag": {
+                "plan_id": plan.plan_id,
+                "valid": dag_valid,
+                "topological_order": dag_order,
+                "node_count": len(plan.nodes),
+                "error": dag_error,
+            },
+            "llm_reviewed": False,
+        }
+
+    @classmethod
+    def _with_supervisor_audit(cls, state: AgentGraphState, decision: dict[str, Any]) -> dict[str, Any]:
+        audit = cls._supervisor_audit(state, decision)
+        return {
+            **decision,
+            "confidence": audit["calibrated_confidence"],
+            "supervisor_audit": audit,
+        }
+
+    @classmethod
+    def _safe_fallback_after_dag_failure(
+        cls,
+        state: AgentGraphState,
+        rejected: dict[str, Any],
+        audit: dict[str, Any],
+    ) -> dict[str, Any]:
+        route_name = str(rejected.get("route_name") or "")
+        failed = set(str(item) for item in audit.get("critical_failures", []))
+        warnings = set(str(item) for item in audit.get("warning_nodes", []))
+        if "domain_ambiguity" in warnings:
+            intent = "clarify_ambiguous_request"
+            reason = "Phase-diagram and LAMMPS execution signals overlap. Ask the user to choose one execution objective before continuing."
+        elif "asset_prerequisite" in failed:
+            intent = "clarify_image_request"
+            reason = "The selected route requires an uploaded image or reusable recognition context. Ask for the missing image before execution."
+        elif "compute_prerequisite" in failed and route_name == "phase_diagram.generate":
+            intent = "clarify_phase_request"
+            reason = "The phase-diagram route is missing a material system. Ask for the binary/ternary system before execution."
+        elif "compute_prerequisite" in failed and route_name == "lammps.generate":
+            intent = "clarify_lammps_request"
+            missing = audit.get("missing_lammps_slots") or []
+            reason = f"The LAMMPS route is missing required slots: {', '.join(str(item) for item in missing)}."
+        else:
+            intent = "clarify_ambiguous_request"
+            reason = "The proposed route failed the supervisor DAG contract. Ask for clarification instead of executing an unsafe path."
+
+        fallback: dict[str, Any] = {
+            "route_name": "conversation.answer",
+            "next_step": "chat",
+            "compute_domain": "none",
+            "intent": intent,
+            "reason": reason,
+            "source": "supervisor_dag_fallback",
+        }
+        if intent == "clarify_lammps_request":
+            fallback["clarification_slots"] = list(audit.get("missing_lammps_slots") or [])
+        fallback_audit = cls._supervisor_audit(state, fallback)
+        fallback_audit["llm_reviewed"] = bool(audit.get("llm_reviewed"))
+        if fallback_audit["llm_reviewed"]:
+            fallback_audit["requires_llm_review"] = False
+        fallback_audit["rejected_route"] = route_name
+        fallback_audit["rejected_failures"] = sorted(failed)
+        return {
+            **fallback,
+            "confidence": fallback_audit["calibrated_confidence"],
+            "supervisor_audit": fallback_audit,
+        }
+
+    @classmethod
+    def _needs_llm_review(cls, state: AgentGraphState, heuristic: dict[str, Any]) -> bool:
+        """Reserve the LLM supervisor for genuinely ambiguous routing cases.
+
+        Explicit image, compute, clarification, and ordinary chat intents are
+        already covered by deterministic rules. Running another model call for
+        those cases adds latency without changing the route in normal traffic.
+        """
+
+        if str(heuristic.get("intent") or "") == "clarify_lammps_request":
+            return False
+        audit = heuristic.get("supervisor_audit") if isinstance(heuristic.get("supervisor_audit"), dict) else {}
+        if audit.get("requires_llm_review") is True:
+            return True
+        message = state["request"].message
+        lowered = message.lower()
+        if float(heuristic.get("confidence") or 0.0) < 0.75:
+            return True
+        if len(message) > 1400:
+            return True
+        mentions_phase = "相图" in message or "phase diagram" in lowered
+        mentions_lammps = "lammps" in lowered or "分子动力学" in message
+        if mentions_phase and mentions_lammps:
+            return True
+        last_run = state.get("last_run_context")
+        generic_follow_up = any(token in message for token in ("改一下", "继续", "再来", "重新做", "按刚才的"))
+        if last_run and last_run.run_id and generic_follow_up and len(message) < 80:
+            return True
+        return False
+
     def decide(self, state: AgentGraphState) -> dict[str, Any]:
-        heuristic = self._heuristic_decision(state)
+        heuristic = self._with_supervisor_audit(state, self._heuristic_decision(state))
         if not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
                 self.llm_client.require_configured(agent_name="SupervisorAgent", capability="任务路由决策")
+            heuristic_audit = heuristic.get("supervisor_audit") or {}
+            if heuristic_audit.get("passed") is False:
+                return self._safe_fallback_after_dag_failure(state, heuristic, heuristic_audit)
+            return heuristic
+
+        if not self._needs_llm_review(state, heuristic):
             return heuristic
 
         request = state["request"]
@@ -269,7 +713,7 @@ class SupervisorAgent:
                     "Choose conversation.answer for normal discussion or follow-up explanation. Return JSON only."
                 ),
                 user_prompt=(
-                    "Return JSON with keys: route_name, next_step, compute_domain, intent, reason, confidence.\n"
+                    "Return JSON with keys: route_name, next_step, compute_domain, intent, reason.\n"
                     "Valid next_step values: chat, recognition, compute.\n"
                     "Valid compute_domain values: none, phase_diagram, lammps.\n"
                     "Use the heuristic baseline only as a fallback reference; make an independent routing judgment from the current conversation context.\n"
@@ -279,10 +723,11 @@ class SupervisorAgent:
                     f"Uploaded assets:\n{json.dumps(assets, ensure_ascii=False)}\n\n"
                     f"Recognition result:\n{recognition_result.model_dump_json() if recognition_result else '{}'}\n\n"
                     f"Last run context:\n{last_run_context.model_dump_json() if last_run_context else '{}'}\n\n"
-                    f"Heuristic baseline:\n{json.dumps(heuristic, ensure_ascii=False)}"
+                    f"Heuristic baseline and DAG audit:\n{json.dumps(heuristic, ensure_ascii=False)}"
                 ),
                 max_tokens=600,
                 temperature=0.1,
+                capability="supervisor.route",
             )
         except RuntimeError as exc:
             if settings.require_llm_for_agents:
@@ -303,30 +748,49 @@ class SupervisorAgent:
             if settings.require_llm_for_agents:
                 raise LLMRequiredError(f"SupervisorAgent 返回了无效 route_name={route_name!r}，因此无法以真实 agent 方式继续。")
             route_name = heuristic["route_name"]
-        next_step = str(payload.get("next_step") or heuristic["next_step"]).strip()
-        if next_step not in {"chat", "recognition", "compute"}:
-            if settings.require_llm_for_agents:
-                raise LLMRequiredError(f"SupervisorAgent 返回了无效 next_step={next_step!r}，因此无法以真实 agent 方式继续。")
-            next_step = heuristic["next_step"]
-        compute_domain = str(payload.get("compute_domain") or heuristic.get("compute_domain") or "none").strip()
-        if compute_domain not in {"none", "phase_diagram", "lammps"}:
-            if settings.require_llm_for_agents:
-                raise LLMRequiredError(f"SupervisorAgent 返回了无效 compute_domain={compute_domain!r}，因此无法以真实 agent 方式继续。")
-            compute_domain = str(heuristic.get("compute_domain") or "none")
+        # The selected route owns its execution contract. LLM-provided
+        # next_step/compute_domain values are advisory and cannot violate the
+        # Supervisor DAG.
+        next_step, compute_domain = self.ROUTE_CONTRACTS[route_name]
+
+        canonical_intent = str(payload.get("intent") or heuristic["intent"]).strip() or heuristic["intent"]
+        heuristic_audit = heuristic.get("supervisor_audit") or {}
+        heuristic_failures = set(str(item) for item in heuristic_audit.get("critical_failures", []))
+        heuristic_route = str(heuristic.get("route_name") or "")
+        if route_name == "conversation.answer":
+            if "asset_prerequisite" in heuristic_failures:
+                canonical_intent = "clarify_image_request"
+            elif "compute_prerequisite" in heuristic_failures and heuristic_route == "phase_diagram.generate":
+                canonical_intent = "clarify_phase_request"
+            elif "compute_prerequisite" in heuristic_failures and heuristic_route == "lammps.generate":
+                canonical_intent = "clarify_lammps_request"
 
         try:
-            confidence = max(0.0, min(float(payload.get("confidence", heuristic["confidence"])), 1.0))
+            llm_reported_confidence = max(0.0, min(float(payload.get("confidence")), 1.0))
         except (TypeError, ValueError):
-            confidence = float(heuristic["confidence"])
+            llm_reported_confidence = None
 
-        return {
+        llm_decision: dict[str, Any] = {
             "route_name": route_name,
             "next_step": next_step,
             "compute_domain": compute_domain,
-            "intent": str(payload.get("intent") or heuristic["intent"]).strip() or heuristic["intent"],
+            "intent": canonical_intent,
             "reason": str(payload.get("reason") or heuristic["reason"]).strip() or heuristic["reason"],
-            "confidence": confidence,
             "source": "llm_supervisor",
+            # Retained only for offline calibration analysis. It never enters
+            # the runtime confidence formula or an execution gate.
+            "llm_reported_confidence": llm_reported_confidence,
+        }
+        final_audit = self._supervisor_audit(state, llm_decision)
+        final_audit["llm_reviewed"] = True
+        final_audit["requires_llm_review"] = False
+        final_audit["llm_reported_confidence"] = llm_reported_confidence
+        if not final_audit["passed"]:
+            return self._safe_fallback_after_dag_failure(state, llm_decision, final_audit)
+        return {
+            **llm_decision,
+            "confidence": final_audit["calibrated_confidence"],
+            "supervisor_audit": final_audit,
         }
 
     def build_route(self, decision: dict[str, Any]) -> TaskRoute:

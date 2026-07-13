@@ -436,10 +436,11 @@ class LongTermMemoryStore:
         recognition_result: RecognitionResult | None,
         last_run_context: LastRunContext,
         previous_snapshot: LongTermMemorySnapshot | None = None,
+        use_llm: bool = True,
     ) -> LongTermMemorySnapshot:
         previous = previous_snapshot or self.load(conversation_id)
         heuristics = self._build_heuristic_payload(messages, recognition_result, last_run_context, previous)
-        llm_summary = self._maybe_build_llm_summary(messages, recognition_result, last_run_context, previous)
+        llm_summary = self._maybe_build_llm_summary(messages, recognition_result, last_run_context, previous) if use_llm else ""
         compression_method = "llm_compaction" if llm_summary else "heuristic_compaction"
         return LongTermMemorySnapshot(
             conversation_id=conversation_id,
@@ -662,7 +663,7 @@ class MemoryStore:
                 "module": "ShortTermMemoryStore",
                 "purpose": "recent turns, uploaded assets, recognition result, last run context",
                 "retention_policy": {
-                    "messages": "last 20 turns",
+                    "messages": "last 200 messages",
                     "uploaded_assets": "last 6 assets",
                 },
                 "message_count": snapshot.short_term.message_count,
@@ -706,13 +707,10 @@ class MemoryStore:
             last_run_context,
             recognition_result=recognition_result,
         )
-        long_term = self.long_term_store.summarize(
-            conversation_id=request.conversation_id,
-            messages=merged_messages,
-            recognition_result=recognition_result,
-            last_run_context=last_run_context,
-            previous_snapshot=snapshot.long_term,
-        )
+        # Loading a request must be read-only and cheap. Long-term memory was
+        # already persisted after the previous turn; recomputing it here caused
+        # an unnecessary LLM call before routing even started.
+        long_term = snapshot.long_term
         return MemorySnapshot(
             conversation_id=request.conversation_id,
             short_term=ShortTermMemorySnapshot(
@@ -751,6 +749,7 @@ class MemoryStore:
         last_run_context: LastRunContext,
         current_context_summary: str,
         previous_snapshot: MemorySnapshot | None = None,
+        long_term_snapshot: LongTermMemorySnapshot | None = None,
     ) -> MemorySnapshot:
         previous = previous_snapshot or self.load(conversation_id)
         short_summary = self.summarize_short_term(
@@ -758,19 +757,20 @@ class MemoryStore:
             last_run_context,
             recognition_result=recognition_result,
         )
-        long_term = self.long_term_store.summarize(
+        long_term = long_term_snapshot or self.long_term_store.summarize(
             conversation_id=conversation_id,
             messages=messages,
             recognition_result=recognition_result,
             last_run_context=last_run_context,
             previous_snapshot=previous.long_term,
+            use_llm=False,
         )
         combined_summary = self._combine_summaries(short_summary, long_term)
         return MemorySnapshot(
             conversation_id=conversation_id,
             short_term=ShortTermMemorySnapshot(
                 conversation_id=conversation_id,
-                messages=messages[-20:],
+                messages=messages[-200:],
                 uploaded_assets=uploaded_assets[-6:],
                 recognition_result=recognition_result,
                 last_run_context=last_run_context,
@@ -829,12 +829,37 @@ class MemoryStore:
         previous_long_term: LongTermMemorySnapshot | None = None,
         conversation_id: str = "default",
     ) -> str:
+        summary, _long_term = self.summarize_with_snapshot(
+            messages,
+            last_run_context,
+            recognition_result=recognition_result,
+            previous_long_term=previous_long_term,
+            conversation_id=conversation_id,
+        )
+        return summary
+
+    def summarize_with_snapshot(
+        self,
+        messages: list[ConversationTurn],
+        last_run_context: LastRunContext,
+        *,
+        recognition_result: RecognitionResult | None = None,
+        previous_long_term: LongTermMemorySnapshot | None = None,
+        conversation_id: str = "default",
+    ) -> tuple[str, LongTermMemorySnapshot]:
         short_summary = self.summarize_short_term(messages, last_run_context, recognition_result=recognition_result)
+        previous = previous_long_term or LongTermMemorySnapshot(conversation_id=conversation_id)
+        new_message_count = max(0, len(messages) - previous.source_message_count)
+        total_chars = sum(len(turn.content) for turn in messages[-24:])
+        # LLM compaction is a periodic maintenance operation, not a per-request
+        # dependency. Heuristic summaries remain available on every turn.
+        use_llm = len(messages) >= 12 and (new_message_count >= 6 or total_chars >= 12_000)
         long_term = self.long_term_store.summarize(
             conversation_id=conversation_id,
             messages=messages,
             recognition_result=recognition_result,
             last_run_context=last_run_context,
-            previous_snapshot=previous_long_term,
+            previous_snapshot=previous,
+            use_llm=use_llm,
         )
-        return self._combine_summaries(short_summary, long_term)
+        return self._combine_summaries(short_summary, long_term), long_term

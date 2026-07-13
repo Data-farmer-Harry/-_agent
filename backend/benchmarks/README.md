@@ -349,6 +349,12 @@ cd backend && conda run -n lammps_agent python benchmarks/run_benchmarks.py run-
 
 默认 `run-all` 是 deterministic gate：`lammps_contract` 和 `lammps_e2e` 会强制使用 mock LAMMPS runtime，RAG embedding 使用本地 hash，reranker 关闭，防止本机 `.env` 中的真实 API key 或真实 LAMMPS 环境影响快速 CI。需要真实 LAMMPS 时显式追加 `--real-lammps`，需要真实 embedding/reranker/Judge backend 时显式追加 `--live-backends`，或使用根目录 `make test-lammps-real` / `make test-live-backends` / `make test-live`。
 
+## 高级学习方法专项评测
+
+根目录运行 `make test-advanced-methods`，会执行 `advanced_methods_benchmark.py`。当前包含 341 条确定性 case，覆盖部署态 MLP 路由、PRM DAG 搜索、类型化 LAMMPS IR、GraphRAG 检索风险和多保真调度。
+
+该评测验证方法契约和已知 mutation，不调用线上 LLM，也不运行真实 LAMMPS。报告中的 100% 只能称为 method-contract accuracy；真实简历指标仍需通过 live provider、真实势函数、冻结 OOD 任务和重复实验获得。
+
 总控报告默认写入：
 
 - `backend/outputs/benchmarks/latest.json`

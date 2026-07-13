@@ -7,6 +7,7 @@ import re
 import socket
 import ssl
 import time
+from functools import lru_cache
 from threading import Lock
 from urllib import error, request as urllib_request
 
@@ -15,8 +16,9 @@ from app.config import settings
 
 _ASCII_TOKEN_PATTERN = re.compile(r"[a-z0-9_+\-./]{2,}", flags=re.IGNORECASE)
 _CJK_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,}")
-_REMOTE_BACKEND_FAILURES: dict[str, bool] = {}
+_REMOTE_BACKEND_FAILURES: dict[str, float] = {}
 _REMOTE_BACKEND_LOCK = Lock()
+_REMOTE_FAILURE_COOLDOWN_SECONDS = 30.0
 
 
 def _feature_hash(feature: str, *, dimensions: int) -> int:
@@ -119,8 +121,11 @@ def effective_embedding_backend(preferred_backend: str | None = None) -> str:
         return "local_hash"
     signature = embedding_signature(configured)
     with _REMOTE_BACKEND_LOCK:
-        if _REMOTE_BACKEND_FAILURES.get(signature):
-            return "local_hash"
+        failed_at = _REMOTE_BACKEND_FAILURES.get(signature)
+        if failed_at is not None:
+            if time.monotonic() - failed_at < _REMOTE_FAILURE_COOLDOWN_SECONDS:
+                return "local_hash"
+            _REMOTE_BACKEND_FAILURES.pop(signature, None)
     return configured
 
 
@@ -143,7 +148,7 @@ def _normalize_remote_vector(raw: object) -> tuple[float, ...]:
 def _mark_remote_backend_failed(backend: str) -> None:
     signature = embedding_signature(backend)
     with _REMOTE_BACKEND_LOCK:
-        _REMOTE_BACKEND_FAILURES[signature] = True
+        _REMOTE_BACKEND_FAILURES[signature] = time.monotonic()
 
 
 def _clear_remote_backend_failure(backend: str) -> None:
@@ -171,7 +176,7 @@ def _fetch_remote_embeddings(texts: list[str]) -> tuple[tuple[float, ...], ...]:
         },
         method="POST",
     )
-    timeout = max(3, min(settings.llm_request_timeout_seconds, 20))
+    timeout = max(3, min(settings.llm_request_timeout_seconds, 8))
     try:
         with urllib_request.urlopen(req, timeout=timeout) as response:
             body = response.read().decode("utf-8")
@@ -209,7 +214,7 @@ def build_embeddings(
 
     batch_size = max(1, settings.materials_rag_embedding_api_batch_size)
     vectors: list[tuple[float, ...]] = []
-    max_attempts = max(1, settings.llm_request_max_retries + 1)
+    max_attempts = 1
     try:
         for index in range(0, len(texts), batch_size):
             chunk = texts[index : index + batch_size]
@@ -238,8 +243,40 @@ def build_embedding_with_backend(
     *,
     backend: str | None = None,
 ) -> tuple[tuple[float, ...], str]:
-    vectors, resolved_backend = build_embeddings([text], backend=backend)
-    return (vectors[0] if vectors else tuple()), resolved_backend
+    resolved_backend = effective_embedding_backend(backend)
+    if resolved_backend in {"llm_api", "openai_compatible"}:
+        try:
+            vector = _fetch_remote_query_embedding_cached(embedding_signature(resolved_backend), text)
+        except RuntimeError:
+            _mark_remote_backend_failed(resolved_backend)
+            return local_hash_embedding(text), "local_hash"
+        _clear_remote_backend_failure(resolved_backend)
+        return vector, resolved_backend
+    vectors, actual_backend = build_embeddings([text], backend=resolved_backend)
+    return (vectors[0] if vectors else tuple()), actual_backend
+
+
+@lru_cache(maxsize=512)
+def _fetch_remote_query_embedding_cached(signature: str, text: str) -> tuple[float, ...]:
+    try:
+        from app.rag.sqlite_vector_store import get_vector_store
+
+        cached = get_vector_store().get_cached_query_embedding(embedding_signature=signature, text=text)
+    except (RuntimeError, OSError):
+        cached = None
+    if cached:
+        return cached
+    vectors = _fetch_remote_embeddings([text])
+    if not vectors:
+        raise RuntimeError("Embedding API returned no query vector.")
+    vector = vectors[0]
+    try:
+        from app.rag.sqlite_vector_store import get_vector_store
+
+        get_vector_store().cache_query_embedding(embedding_signature=signature, text=text, vector=vector)
+    except (RuntimeError, OSError):
+        pass
+    return vector
 
 
 def build_embedding(text: str) -> tuple[float, ...]:

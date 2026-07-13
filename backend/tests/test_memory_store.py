@@ -9,10 +9,35 @@ from pathlib import Path
 
 from app.memory import MemoryStore
 from app.state import ConversationTurn, LastRunContext, LongTermMemorySnapshot, RecognitionResult
-from tests.support import build_request
+from tests.support import ScriptedLLMClient, build_request
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_memory_hot_path_preserves_history_without_per_turn_llm_compaction(self) -> None:
+        llm = ScriptedLLMClient()
+        messages = [
+            ConversationTurn(role="user" if index % 2 == 0 else "assistant", content=f"history-{index}")
+            for index in range(120)
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = MemoryStore(root_dir=Path(tmp_dir), llm_client=llm)
+            snapshot = store.build_next_snapshot(
+                conversation_id="full-history",
+                messages=messages,
+                uploaded_assets=[],
+                recognition_result=None,
+                last_run_context=LastRunContext(),
+                current_context_summary="",
+            )
+            store.save(snapshot)
+            merged = store.merge_request(build_request("继续", conversation_id="full-history"))
+
+        self.assertEqual(len(snapshot.messages), 120)
+        self.assertEqual(len(merged.messages), 120)
+        self.assertEqual(merged.messages[0].content, "history-0")
+        self.assertEqual(merged.messages[-1].content, "history-119")
+        self.assertEqual(llm.calls, [])
+
     def test_build_next_snapshot_enriches_session_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             store = MemoryStore(root_dir=Path(tmp_dir))

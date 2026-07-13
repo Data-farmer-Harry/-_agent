@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import CONFIGS_ROOT, settings
-from app.core.llm_route_learning import LearnedPolicyConfig, LearnedRouteRecommender
+from app.core.llm_route_learning import LearnedPolicyConfig, LearnedRouteRecommender, routing_focus_text
 
 
 DEFAULT_LLM_ROUTING_CONFIG = CONFIGS_ROOT / "llm_routing.json"
@@ -94,6 +94,7 @@ class LLMRoutingDecision:
     fallback_tier: str = ""
     capability: str = ""
     escalation_depth: int = 0
+    policy_metadata: dict[str, object] = field(default_factory=dict)
 
     def public_payload(self) -> dict[str, object]:
         return {
@@ -103,6 +104,7 @@ class LLMRoutingDecision:
             "fallback_tier": self.fallback_tier,
             "capability": self.capability,
             "escalation_depth": self.escalation_depth,
+            "policy_metadata": self.policy_metadata,
             "route": self.route.public_payload(),
         }
 
@@ -158,7 +160,7 @@ def _learned_policy_from_payload(payload: Any) -> LearnedPolicyConfig:
     return LearnedPolicyConfig(
         enabled=_as_bool(payload.get("enabled"), False),
         mode=str(payload.get("mode") or "shadow").strip().lower(),
-        model_path=str(payload.get("model_path") or "backend/outputs/llm_route_mlp/model.json").strip(),
+        model_path=str(payload.get("model_path") or "backend/models/llm_route_mlp/model.json").strip(),
         confidence_threshold=max(0.0, min(_as_float(payload.get("confidence_threshold"), 0.62), 1.0)),
         allow_downgrade=_as_bool(payload.get("allow_downgrade"), False),
     )
@@ -407,7 +409,8 @@ class LLMRouter:
             )
 
         text = f"{system_prompt}\n{user_prompt}"
-        lowered = text.lower()
+        focus_text = routing_focus_text(user_prompt)
+        lowered_focus = focus_text.lower()
         capability_lower = capability.strip().lower()
         score = 0
         reasons: list[str] = []
@@ -430,8 +433,12 @@ class LLMRouter:
             score += 6
             reasons.append("moderate_generation_budget")
 
-        if multimodal or self._contains_any(lowered, self._VISION_MARKERS) or "vision" in capability_lower:
-            return self._decision_with_learned_policy(
+        # Generic system prompts often mention image/vision as a capability boundary.
+        # Only real multimodal input, an explicit vision capability, or an actual
+        # data/image payload should force the vision tier.
+        has_image_payload = "data:image/" in lowered_focus or "image_url" in lowered_focus
+        if multimodal or has_image_payload or "vision" in capability_lower or "recognition" in capability_lower:
+            return self._decision_with_advanced_policies(
                 rule_tier="vision",
                 score=max(score, 75),
                 reasons=tuple([*reasons, "vision_or_multimodal"]),
@@ -444,27 +451,27 @@ class LLMRouter:
                 min_tier=VISION_TIER,
             )
 
-        if self._contains_any(lowered, self._JSON_MARKERS):
+        if self._contains_any(lowered_focus, self._JSON_MARKERS):
             score += 8
             reasons.append("structured_output")
 
-        if self._contains_any(lowered, self._CODE_MARKERS):
+        if self._contains_any(lowered_focus, self._CODE_MARKERS):
             score += 22
             reasons.append("code_or_repair")
 
-        if self._contains_any(lowered, self._LAMMPS_MARKERS):
+        if self._contains_any(lowered_focus, self._LAMMPS_MARKERS):
             score += 30
             reasons.append("lammps_or_md")
 
-        if self._contains_any(lowered, self._MATERIALS_MARKERS):
+        if self._contains_any(lowered_focus, self._MATERIALS_MARKERS):
             score += 16
             reasons.append("materials_science")
 
-        if self._contains_any(lowered, self._RESEARCH_MARKERS):
+        if self._contains_any(lowered_focus, self._RESEARCH_MARKERS):
             score += 16
             reasons.append("research_or_evaluation")
 
-        if re.search(r"\b(add|delete|modify|verify)\b", lowered) or "三层" in user_prompt:
+        if re.search(r"\b(add|delete|modify|verify)\b", lowered_focus) or "三层" in focus_text:
             score += 10
             reasons.append("protocol_sensitive")
 
@@ -480,7 +487,7 @@ class LLMRouter:
         if not reasons:
             reasons.append("simple_short_prompt")
 
-        return self._decision_with_learned_policy(
+        return self._decision_with_advanced_policies(
             rule_tier=tier,
             score=min(score, 100),
             reasons=tuple(reasons),
@@ -501,6 +508,7 @@ class LLMRouter:
         reasons: tuple[str, ...],
         capability: str = "",
         escalation_depth: int = 0,
+        policy_metadata: dict[str, object] | None = None,
     ) -> LLMRoutingDecision:
         normalized = _normalize_tier(tier)
         fallback_tier = self.config.fallbacks.get(normalized, "")
@@ -513,6 +521,34 @@ class LLMRouter:
             fallback_tier=fallback_tier,
             capability=capability,
             escalation_depth=escalation_depth,
+            policy_metadata=policy_metadata or {},
+        )
+
+    def _decision_with_advanced_policies(
+        self,
+        *,
+        rule_tier: str,
+        score: int,
+        reasons: tuple[str, ...],
+        capability: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        multimodal: bool,
+        min_tier: str = "",
+    ) -> LLMRoutingDecision:
+        return self._decision_with_learned_policy(
+            rule_tier=rule_tier,
+            score=score,
+            reasons=reasons,
+            capability=capability,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            multimodal=multimodal,
+            min_tier=min_tier,
         )
 
     def _decision_with_learned_policy(

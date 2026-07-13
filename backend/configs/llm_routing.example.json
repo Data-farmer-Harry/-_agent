@@ -6,36 +6,13 @@
   "max_escalations": 1,
   "routes": {
     "fast": {
-      "api_base_url": "https://openrouter.ai/api/v1",
+      "api_base_url": "https://api.deepseek.com",
       "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
-      "model": "your-fast-chat-model",
+      "model": "deepseek-v4-flash",
       "timeout_seconds": 45,
-      "max_tokens": 1800,
-      "temperature": 0.1
-    },
-    "balanced": {
-      "api_base_url": "https://openrouter.ai/api/v1",
-      "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
-      "model": "your-balanced-chat-model",
-      "timeout_seconds": 90,
-      "max_tokens": 3500,
-      "temperature": 0.1
-    },
-    "strong": {
-      "api_base_url": "https://openrouter.ai/api/v1",
-      "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
-      "model": "your-strong-reasoning-model",
-      "timeout_seconds": 150,
-      "max_tokens": 5000,
-      "temperature": 0.1
-    },
-    "vision": {
-      "api_base_url": "https://openrouter.ai/api/v1",
-      "api_key_env": "PHASE_DIAGRAM_LLM_API_KEY",
-      "model": "your-vision-model",
-      "timeout_seconds": 150,
-      "max_tokens": 4000,
-      "temperature": 0.1
+      "max_tokens": 1200,
+      "temperature": 0.1,
+      "enable_thinking": false
     }
   },
   "fallbacks": {
@@ -45,15 +22,15 @@
     "vision": "strong"
   },
   "learned_policy": {
-    "enabled": false,
-    "mode": "shadow",
-    "model_path": "backend/outputs/llm_route_mlp/model.json",
-    "confidence_threshold": 0.62,
-    "allow_downgrade": false,
+    "enabled": true,
+    "mode": "guarded",
+    "model_path": "backend/models/llm_route_mlp/model.json",
+    "confidence_threshold": 0.72,
+    "allow_downgrade": true,
     "notes": [
-      "Run `conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py` to train a local tiny MLP model.",
-      "`shadow` records the neural recommendation but keeps the rule router decision.",
-      "`guarded` lets the MLP override only after confidence_threshold and safety clamps. High-risk capabilities still obey capability_min_tiers."
+      "Run `conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py` to retrain the local MLP model.",
+      "Guarded mode applies only recommendations above confidence_threshold.",
+      "Capability floors still prevent scientific code, repair, review, and vision tasks from being downgraded unsafely."
     ]
   },
   "capability_min_tiers": {
@@ -78,7 +55,7 @@
   "notes": [
     "Copy this file to backend/configs/llm_routing.json to enable local overrides.",
     "Do not place real API keys in this JSON. Keep keys in backend/.env, backend/configs/.env, process env, or your secret manager.",
-    "Replace the placeholder model names with model ids supported by your provider, for example OpenRouter model ids.",
+    "The fast tier uses the official DeepSeek `deepseek-v4-flash` id; balanced/strong/vision inherit the central LLM config unless explicitly added here.",
     "When this file is absent, all tiers safely inherit backend/configs/llm_config.json and the current PHASE_DIAGRAM_LLM_* settings."
   ]
 }
