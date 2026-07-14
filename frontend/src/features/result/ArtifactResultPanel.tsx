@@ -561,28 +561,28 @@ function readAgentObservability(payload: Record<string, unknown>, routeName: str
 
 function qualityBadgeClasses(tone: 'green' | 'amber' | 'red' | 'slate'): string {
   if (tone === 'green') {
-    return 'border-emerald-400/25 bg-emerald-500/10 text-emerald-200';
+    return 'border-emerald-200 bg-emerald-50 text-emerald-800';
   }
   if (tone === 'amber') {
-    return 'border-amber-400/25 bg-amber-500/10 text-amber-200';
+    return 'border-amber-200 bg-amber-50 text-amber-800';
   }
   if (tone === 'red') {
-    return 'border-rose-400/25 bg-rose-500/10 text-rose-200';
+    return 'border-rose-200 bg-rose-50 text-rose-800';
   }
-  return 'border-slate-700 bg-slate-800 text-slate-300';
+  return 'border-slate-200 bg-slate-50 text-slate-700';
 }
 
 function auditBadgeClasses(tone: AuditTone): string {
   if (tone === 'green') {
-    return 'border-emerald-400/25 bg-emerald-500/10 text-emerald-200';
+    return 'border-emerald-200 bg-emerald-50 text-emerald-800';
   }
   if (tone === 'amber') {
-    return 'border-amber-400/25 bg-amber-500/10 text-amber-200';
+    return 'border-amber-200 bg-amber-50 text-amber-800';
   }
   if (tone === 'red') {
-    return 'border-rose-400/25 bg-rose-500/10 text-rose-200';
+    return 'border-rose-200 bg-rose-50 text-rose-800';
   }
-  return 'border-slate-700 bg-slate-900/70 text-slate-300';
+  return 'border-slate-200 bg-slate-50 text-slate-700';
 }
 
 function findingTone(severity: unknown): AuditTone {
@@ -970,15 +970,15 @@ function shouldShowDAGTimeline(timeline: DAGTimelineView): boolean {
 
 function trustBadgeClasses(tone: ExecutionTrustTone): string {
   if (tone === 'green') {
-    return 'border-emerald-400/25 bg-emerald-500/10 text-emerald-100';
+    return 'border-emerald-200 bg-emerald-50 text-emerald-800';
   }
   if (tone === 'amber') {
-    return 'border-amber-400/25 bg-amber-500/10 text-amber-100';
+    return 'border-amber-200 bg-amber-50 text-amber-800';
   }
   if (tone === 'red') {
-    return 'border-rose-400/25 bg-rose-500/10 text-rose-100';
+    return 'border-rose-200 bg-rose-50 text-rose-800';
   }
-  return 'border-slate-700 bg-slate-900/70 text-slate-300';
+  return 'border-slate-200 bg-slate-50 text-slate-700';
 }
 
 function collectTrustArtifacts(artifacts: ArtifactRef[], kind: ExecutionTrustKind): ArtifactRef[] {
@@ -1340,202 +1340,214 @@ function AgentObservabilityCard({ view }: { view: AgentObservabilityView }) {
     return null;
   }
 
-  const routeChips = [
-    view.route.computeDomain && `domain: ${view.route.computeDomain}`,
-    view.route.nextStep && `next: ${view.route.nextStep}`,
-    view.route.selectedTool && `tool: ${view.route.selectedTool}`,
-    view.route.decisionSource && `source: ${view.route.decisionSource}`,
-    view.route.confidence !== null && `confidence ${Math.round(view.route.confidence * 100)}%`,
-    view.route.supervisorDagValid !== null && `DAG ${view.route.supervisorDagValid ? 'passed' : 'failed'}`,
-    view.route.supervisorLlmReviewed === true
-      ? 'LLM reviewed'
-      : view.route.supervisorRequiresReview === true
-        ? 'review required'
-        : view.route.supervisorLlmReviewed === false
-          ? 'deterministic'
-          : '',
-  ].filter(Boolean) as string[];
+  const confidencePercent = view.route.confidence !== null ? Math.round(view.route.confidence * 100) : null;
   const ragChips = [
     view.rag.materialsRequested
-      ? `materials hits ${view.rag.materialsHitCount}`
+      ? `材料语料命中 ${view.rag.materialsHitCount}`
       : view.rag.materialsAvailable
-        ? 'materials RAG skipped'
-        : 'materials RAG idle',
-    view.rag.thermoAvailable ? `thermo candidates ${view.rag.thermoCandidateCount}` : 'thermo RAG idle',
-    view.rag.sharedAvailable ? `memory selected ${view.rag.sharedSelectedCount}` : 'memory idle',
+        ? '材料 RAG 已跳过'
+        : '材料 RAG 未启用',
+    view.rag.thermoAvailable ? `热力学候选 ${view.rag.thermoCandidateCount}` : '热力学 RAG 未调用',
+    view.rag.sharedAvailable ? `共享记忆选中 ${view.rag.sharedSelectedCount}` : '共享记忆未调用',
   ];
   const latestLlm = view.llm.recentCalls[0];
   const latestLearnedReason = latestLlm?.reasons.find((reason) => reason.startsWith('learned_')) || '';
+  const toolStateLabel = view.tools.needTool === true ? '已进入工具路径' : view.tools.needTool === false ? '本轮无需工具' : '工具策略未返回';
+  const supervisorMode = view.route.supervisorLlmReviewed === true
+    ? 'LLM 复核'
+    : view.route.supervisorRequiresReview === true
+      ? '等待复核'
+      : view.route.supervisorLlmReviewed === false
+        ? '确定性决策'
+        : '未标注';
 
   return (
-    <div data-testid="agent-observability-panel" className="rounded-2xl border border-cyan-400/20 bg-slate-950/95 px-4 py-4 text-cyan-50 shadow-inner">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <div className="rounded-xl border border-cyan-200/20 bg-black/20 p-2">
-            <BarChart3 className="h-5 w-5 text-cyan-200" />
+    <div data-testid="agent-observability-panel" className="overflow-hidden rounded-2xl border border-slate-200 bg-white text-slate-800 shadow-sm">
+      <div className="flex flex-col gap-4 border-b border-slate-200 bg-gradient-to-r from-slate-50 via-white to-indigo-50/60 px-4 py-4 sm:px-5 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="shrink-0 rounded-xl border border-indigo-100 bg-indigo-50 p-2.5">
+            <BarChart3 className="h-5 w-5 text-indigo-600" />
           </div>
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-cyan-200/80">Agent Observability</p>
-            <h4 className="mt-1 text-base font-semibold">{view.route.name}</h4>
-            <p className="mt-1 text-sm leading-6 text-cyan-50/85">
-              Route、Tool、RAG/Memory 与 LLM 路由的本轮总览；用于解释 agent 为什么选择这条执行路径。
+          <div className="min-w-0">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-600">Agent Observability</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <h4 className="break-all text-base font-semibold text-slate-900">{view.route.name}</h4>
+              <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 font-mono text-[10px] text-slate-600">
+                {view.route.computeDomain || 'none'}
+              </span>
+            </div>
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">
+              展示本轮路由依据、工具调用、知识检索与模型选择；详细数据按执行链路分区呈现。
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap justify-end gap-2 text-[11px] font-semibold">
-          {routeChips.slice(0, 7).map((chip) => (
-            <span key={chip} className="rounded-full border border-cyan-200/20 bg-black/20 px-3 py-1">
-              {chip}
+        <div className="flex flex-wrap gap-2 text-[11px] font-semibold lg:max-w-[46%] lg:justify-end">
+          {confidencePercent !== null ? (
+            <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-indigo-700">置信度 {confidencePercent}%</span>
+          ) : null}
+          {view.route.supervisorDagValid !== null ? (
+            <span className={`rounded-full border px-3 py-1 ${view.route.supervisorDagValid ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700'}`}>
+              DAG {view.route.supervisorDagValid ? '通过' : '异常'}
             </span>
-          ))}
+          ) : null}
+          <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-600">{supervisorMode}</span>
         </div>
       </div>
 
-      <div className="mt-4 grid gap-3 xl:grid-cols-4">
-        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
-          <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-cyan-200" />
-            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Route</p>
+      <div className="grid gap-4 p-4 sm:p-5 xl:grid-cols-12">
+        <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 xl:col-span-7">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <div className="rounded-lg bg-indigo-100 p-1.5 text-indigo-700"><Activity className="h-4 w-4" /></div>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-indigo-600">路由决策</p>
+                <p className="mt-0.5 text-sm font-semibold text-slate-900">{view.route.intent || view.route.name}</p>
+              </div>
+            </div>
+            {view.route.nextStep ? <span className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 font-mono text-[10px] text-slate-600">next: {view.route.nextStep}</span> : null}
           </div>
-          <p className="mt-2 text-sm font-semibold">{view.route.intent || view.route.name}</p>
-          <p className="mt-1 line-clamp-3 text-[11px] leading-5 text-cyan-50/70">{view.route.reason || 'No route reason returned.'}</p>
+          <p className="mt-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-xs leading-5 text-slate-600">
+            {view.route.reason || '后端未返回路由原因。'}
+          </p>
+          <dl className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">决策来源</dt><dd className="mt-1 break-all font-semibold text-slate-700">{view.route.decisionSource || '—'}</dd></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">候选首位</dt><dd className="mt-1 break-all font-semibold text-slate-700">{view.route.supervisorTopRoute || view.route.name}</dd></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">置信边际</dt><dd className="mt-1 font-semibold text-slate-700">{view.route.supervisorConfidenceMargin !== null ? `${Math.round(view.route.supervisorConfidenceMargin * 100)}%` : '—'}</dd></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">DAG 节点</dt><dd className="mt-1 font-semibold text-slate-700">{view.route.supervisorDagNodeCount || '—'}</dd></div>
+          </dl>
           {view.route.supervisorConfidenceSource ? (
-            <div className="mt-2 border-t border-cyan-200/10 pt-2 text-[10px] leading-5 text-cyan-50/60">
-              <p>
-                {view.route.supervisorConfidenceSource} · top {view.route.supervisorTopRoute || view.route.name}
-                {view.route.supervisorConfidenceMargin !== null
-                  ? ` · margin ${Math.round(view.route.supervisorConfidenceMargin * 100)}%`
-                  : ''}
-              </p>
-              <p>
-                DAG {view.route.supervisorDagValid ? 'valid' : 'invalid'} · {view.route.supervisorDagNodeCount} nodes
-                {view.route.supervisorFailures.length ? ` · failed ${view.route.supervisorFailures.join(', ')}` : ''}
-              </p>
+            <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
+              <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1">{view.route.supervisorConfidenceSource}</span>
+              {view.route.selectedTool ? <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1">tool: {view.route.selectedTool}</span> : null}
+              {view.route.supervisorFailures.length ? <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-rose-700">异常: {view.route.supervisorFailures.join(', ')}</span> : null}
             </div>
           ) : null}
-        </div>
+        </section>
 
-        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
+        <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 xl:col-span-5">
           <div className="flex items-center gap-2">
-            <Gauge className="h-4 w-4 text-cyan-200" />
-            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Tool calls</p>
+            <div className="rounded-lg bg-amber-100 p-1.5 text-amber-700"><Gauge className="h-4 w-4" /></div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-amber-700">工具策略</p>
+              <p className="mt-0.5 text-sm font-semibold text-slate-900">{toolStateLabel}</p>
+            </div>
           </div>
-          <p className="mt-2 text-sm font-semibold">
-            {view.tools.needTool === true ? 'tool path active' : view.tools.needTool === false ? 'no tool required' : 'tool policy unknown'}
-          </p>
-          <p className="mt-1 text-[11px] leading-5 text-cyan-50/70">
-            selected {view.tools.selectedTools.length} · results {view.tools.successCount}/{view.tools.resultCount} · failed {view.tools.failureCount}
-          </p>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-lg border border-slate-200 bg-white px-2 py-2"><p className="text-[10px] text-slate-400">已选择</p><p className="mt-1 text-base font-semibold text-slate-800">{view.tools.selectedTools.length}</p></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-2 py-2"><p className="text-[10px] text-slate-400">成功/结果</p><p className="mt-1 text-base font-semibold text-emerald-700">{view.tools.successCount}/{view.tools.resultCount}</p></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-2 py-2"><p className="text-[10px] text-slate-400">失败</p><p className={`mt-1 text-base font-semibold ${view.tools.failureCount ? 'text-rose-700' : 'text-slate-700'}`}>{view.tools.failureCount}</p></div>
+          </div>
           {view.tools.selectedTools.length ? (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {view.tools.selectedTools.slice(0, 4).map((tool) => (
-                <span key={tool} className="rounded-full border border-cyan-200/20 bg-black/20 px-2 py-0.5 text-[10px] font-semibold">
+                <span key={tool} className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-semibold text-amber-800">
                   {tool}
                 </span>
               ))}
             </div>
           ) : (
-            <p className="mt-2 text-[11px] text-cyan-50/55">{view.tools.source || 'policy idle'}</p>
+            <p className="mt-2 break-words text-[11px] leading-5 text-slate-500">{view.tools.reason || view.tools.source || '工具策略处于空闲状态。'}</p>
           )}
-        </div>
+        </section>
 
-        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
+        <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 xl:col-span-6">
           <div className="flex items-center gap-2">
-            <FileText className="h-4 w-4 text-cyan-200" />
-            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">RAG / Memory</p>
+            <div className="rounded-lg bg-emerald-100 p-1.5 text-emerald-700"><FileText className="h-4 w-4" /></div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-700">RAG 与共享记忆</p>
+              <p className="mt-0.5 break-all text-sm font-semibold text-slate-900">{view.rag.material || view.rag.thermoTopDatabase || view.rag.sharedBackend || '本轮检索摘要'}</p>
+            </div>
           </div>
-          <p className="mt-2 text-sm font-semibold">
-            {view.rag.material || view.rag.thermoTopDatabase || view.rag.sharedBackend || 'retrieval summary'}
-          </p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {ragChips.map((chip) => (
-              <span key={chip} className="rounded-full border border-cyan-200/20 bg-black/20 px-2 py-0.5 text-[10px] font-semibold">
+              <span key={chip} className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-800">
                 {chip}
               </span>
             ))}
           </div>
           {view.rag.materialsTitles.length ? (
-            <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-cyan-50/65">
+            <p className="mt-3 line-clamp-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] leading-5 text-slate-600">
               {view.rag.materialsTitles.slice(0, 3).join(' · ')}
             </p>
           ) : view.rag.materialsGateReason ? (
-            <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-cyan-50/65">
-              gate: {view.rag.materialsGateReason}
+            <p className="mt-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] leading-5 text-slate-600">
+              Gate：{view.rag.materialsGateReason}
             </p>
           ) : null}
-        </div>
+        </section>
 
-        <div className="rounded-xl border border-cyan-200/10 bg-black/20 px-3 py-3">
+        <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 xl:col-span-6">
           <div className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-cyan-200" />
-            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">LLM routing</p>
+            <div className="rounded-lg bg-violet-100 p-1.5 text-violet-700"><Sparkles className="h-4 w-4" /></div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-violet-700">模型动态路由</p>
+              <p className="mt-0.5 break-all text-sm font-semibold text-slate-900">{latestLlm ? `${latestLlm.tier || 'tier'} · ${latestLlm.model || 'model'}` : '本轮没有真实 LLM 调用'}</p>
+            </div>
           </div>
-          <p className="mt-2 text-sm font-semibold">
-            {latestLlm ? `${latestLlm.tier || 'tier'} · ${latestLlm.model || 'model'}` : 'no real LLM call observed'}
-          </p>
-          <p className="mt-1 text-[11px] leading-5 text-cyan-50/70">
-            calls {view.llm.totalCalls} · fallback {view.llm.fallbackCount} · success {view.llm.successRate !== null ? formatPercent(view.llm.successRate) : '—'}
-          </p>
-          <p className="mt-1 text-[11px] leading-5 text-cyan-50/60">
-            avg latency {view.llm.avgLatencyMs !== null ? `${formatNumber(view.llm.avgLatencyMs, 0)} ms` : '—'}
-          </p>
+          <dl className="mt-3 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4">
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">调用次数</dt><dd className="mt-1 font-semibold text-slate-800">{view.llm.totalCalls}</dd></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">回退次数</dt><dd className="mt-1 font-semibold text-slate-800">{view.llm.fallbackCount}</dd></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">成功率</dt><dd className="mt-1 font-semibold text-emerald-700">{view.llm.successRate !== null ? formatPercent(view.llm.successRate) : '—'}</dd></div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2"><dt className="text-slate-400">平均延迟</dt><dd className="mt-1 font-semibold text-slate-800">{view.llm.avgLatencyMs !== null ? `${formatNumber(view.llm.avgLatencyMs, 0)} ms` : '—'}</dd></div>
+          </dl>
           {latestLearnedReason ? (
-            <p className="mt-1 truncate text-[11px] leading-5 text-cyan-50/60">
+            <p className="mt-3 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-[11px] leading-5 text-violet-800">
               {formatLearnedRouteReason(latestLearnedReason)}
             </p>
           ) : null}
-        </div>
-      </div>
+        </section>
 
-      {view.tools.results.length || view.llm.recentCalls.length || Object.keys(view.llm.tierCounts).length ? (
-        <div className="mt-3 grid gap-3 xl:grid-cols-3">
+        {view.tools.results.length || view.llm.recentCalls.length || Object.keys(view.llm.tierCounts).length ? (
+        <section className="grid gap-3 border-t border-slate-200 pt-4 md:grid-cols-2 xl:col-span-12">
           {view.tools.results.length ? (
-            <div className="rounded-xl border border-cyan-200/10 bg-black/15 px-3 py-3">
-              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Recent tool observations</p>
-              <div className="mt-2 space-y-1 text-[11px] leading-5 text-cyan-50/75">
+            <div className="rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">最近工具观测</p>
+              <div className="mt-2 space-y-2 text-[11px] leading-5 text-slate-600">
                 {view.tools.results.slice(0, 4).map((result, index) => (
-                  <p key={`${result.toolName}-${index}`} className="truncate">
-                    {result.success === false ? 'failed' : 'ok'} · {result.toolName || 'tool'} · {result.summary || result.error || 'no summary'}
-                  </p>
+                  <div key={`${result.toolName}-${index}`} className="flex items-start gap-2 rounded-lg bg-slate-50 px-2.5 py-2">
+                    <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${result.success === false ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+                    <p className="min-w-0 break-words"><strong className="font-semibold text-slate-800">{result.toolName || 'tool'}</strong> · {result.summary || result.error || '无摘要'}</p>
+                  </div>
                 ))}
               </div>
             </div>
           ) : null}
           {view.llm.recentCalls.length ? (
-            <div className="rounded-xl border border-cyan-200/10 bg-black/15 px-3 py-3">
-              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Recent LLM decisions</p>
-              <div className="mt-2 space-y-1 text-[11px] leading-5 text-cyan-50/75">
+            <div className="rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">最近模型决策</p>
+              <div className="mt-2 space-y-2 text-[11px] leading-5 text-slate-600">
                 {view.llm.recentCalls.slice(0, 4).map((call, index) => (
-                  <p key={`${call.tier}-${call.model}-${index}`} className="truncate">
-                    {call.success === false ? 'failed' : 'ok'} · {call.tier || 'tier'} · {call.capability || 'general'} · {call.durationMs !== null ? `${formatNumber(call.durationMs, 0)} ms` : '—'}
-                    {call.fallbackFrom ? ` · fallback ${call.fallbackFrom}` : ''}
-                  </p>
+                  <div key={`${call.tier}-${call.model}-${index}`} className="flex items-start justify-between gap-3 rounded-lg bg-slate-50 px-2.5 py-2">
+                    <p className="min-w-0 break-words"><strong className="font-semibold text-slate-800">{call.tier || 'tier'} · {call.capability || 'general'}</strong>{call.fallbackFrom ? ` · 从 ${call.fallbackFrom} 回退` : ''}</p>
+                    <span className="shrink-0 font-mono text-slate-500">{call.durationMs !== null ? `${formatNumber(call.durationMs, 0)} ms` : '—'}</span>
+                  </div>
                 ))}
               </div>
             </div>
           ) : null}
           {Object.keys(view.llm.tierCounts).length || view.tools.skills.length ? (
-            <div className="rounded-xl border border-cyan-200/10 bg-black/15 px-3 py-3">
-              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-200/75">Policy summary</p>
+            <div className="rounded-xl border border-slate-200 bg-white p-3 md:col-span-2">
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">策略分布</p>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {Object.entries(view.llm.tierCounts).map(([tier, count]) => (
-                  <span key={tier} className="rounded-full border border-cyan-200/20 bg-black/20 px-2 py-0.5 text-[10px] font-semibold">
+                  <span key={tier} className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[10px] font-semibold text-violet-800">
                     {tier}: {count}
                   </span>
                 ))}
                 {view.tools.skills.slice(0, 4).map((skill) => (
-                  <span key={skill} className="rounded-full border border-indigo-200/20 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-100">
+                  <span key={skill} className="rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[10px] font-semibold text-indigo-800">
                     skill {skill}
                   </span>
                 ))}
               </div>
               {view.rag.thermoStrategy ? (
-                <p className="mt-2 text-[11px] leading-5 text-cyan-50/65">thermo strategy: {view.rag.thermoStrategy}</p>
+                <p className="mt-2 text-[11px] leading-5 text-slate-500">热力学检索策略：{view.rag.thermoStrategy}</p>
               ) : null}
             </div>
           ) : null}
-        </div>
-      ) : null}
+        </section>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -1774,35 +1786,40 @@ export function ArtifactResultPanel({
           ? 'Blue repair path audited'
           : 'Red review passed';
     return (
-      <div className="flex flex-col bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-[min(1820px,100%)] my-4 overflow-hidden shadow-xl">
-        <div className="px-4 py-3 bg-slate-800/80 border-b border-slate-800 flex items-center justify-between backdrop-blur-md">
+      <div className="my-4 flex w-full max-w-[min(1820px,100%)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 shadow-lg shadow-slate-200/60">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
           <div className="flex items-center space-x-3">
-            <Activity className="w-4 h-4 text-emerald-400 animate-pulse" />
-            <span className="text-[11px] font-mono text-slate-200 tracking-tight">MD_ANALYSIS_HUD.RUN</span>
+            <div className={`rounded-lg p-1.5 ${isLoading ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'}`}>
+              <Activity className={`h-4 w-4 ${isLoading ? 'animate-pulse' : ''}`} />
+            </div>
+            <div>
+              <span className="block text-[11px] font-semibold tracking-tight text-slate-800">LAMMPS 结果工作区</span>
+              <span className="mt-0.5 block font-mono text-[9px] uppercase tracking-[0.16em] text-slate-400">run {runId || 'pending'}</span>
+            </div>
           </div>
           <div className="flex items-center space-x-2 text-[10px]">
             <button 
               onClick={() => handleAiClick("请检查此 LAMMPS 输出图谱，分析能量守恒性和组织演变规律。")}
-              className="flex items-center text-indigo-400 font-bold hover:text-indigo-300 px-2 py-0.5 rounded cursor-pointer transition-colors"
+              className="flex cursor-pointer items-center rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 font-bold text-indigo-700 transition-colors hover:bg-indigo-100"
             >
               {isGeminiAnalyzing ? <Loader2 className="w-3 h-3 animate-spin mr-1.5" /> : <Sparkles className="w-3 h-3 mr-1.5" />}
-              ✨ 结果洞察
+              结果洞察
             </button>
-            <span className="text-emerald-500/80 px-2 py-0.5 bg-emerald-500/10 rounded ml-2">DATA: MAPPED</span>
+            <span className="ml-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 font-semibold text-emerald-700">数据已映射</span>
           </div>
         </div>
 
         <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,2.35fr)_340px]">
           <div className="space-y-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 shadow-inner">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="flex items-center justify-between gap-4">
                 <div>
-                  <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Current Result</p>
-                  <h3 className="mt-2 text-lg font-semibold text-slate-100">{selectedStage?.title || '等待结果返回'}</h3>
-                  <p className="mt-1 text-sm text-slate-400">{selectedStage?.subtitle || statusLabel}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-600">当前结果</p>
+                  <h3 className="mt-2 text-lg font-semibold text-slate-900">{selectedStage?.title || '等待结果返回'}</h3>
+                  <p className="mt-1 text-sm text-slate-500">{selectedStage?.subtitle || statusLabel}</p>
                 </div>
                 {isLoading ? (
-                  <div className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-300">
+                  <div className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[11px] font-semibold text-amber-700">
                     处理中
                   </div>
                 ) : null}
@@ -1814,11 +1831,11 @@ export function ArtifactResultPanel({
                 <span className={`rounded-full border px-3 py-1 ${qualityBadgeClasses(qualityTone)}`}>
                   {qualityTitle}
                 </span>
-                <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-slate-300">
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-slate-700">
                   science usable: {executionTrust.canUseAsScience ? 'yes' : 'no'}
                 </span>
               </div>
-              <div data-testid="lammps-primary-result" className="mt-4 overflow-hidden rounded-xl border border-slate-800 bg-black/85">
+              <div data-testid="lammps-primary-result" className={`mt-4 overflow-hidden rounded-xl border ${selectedStage?.kind === 'markdown' ? 'border-slate-200 bg-slate-50' : 'border-slate-800 bg-slate-950'}`}>
                 {!selectedStage ? (
                   <div className="flex h-[420px] items-center justify-center text-sm text-slate-500">
                     当前还没有可预览的结果，后处理完成后会按阶段陆续放到这里。
@@ -1869,37 +1886,37 @@ export function ArtifactResultPanel({
                   </div>
                 ) : (
                   <div className="max-h-[520px] overflow-auto p-5">
-                    <pre className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-200">{markdownText || '报告加载中…'}</pre>
+                    <pre className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-700">{markdownText || '报告加载中…'}</pre>
                   </div>
                 )}
               </div>
               {Object.keys(metrics).length > 0 ? (
                 <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
                   {Object.entries(metrics).map(([key, value]) => (
-                    <div key={key} className="flex flex-col justify-center rounded-lg border border-slate-800 bg-black/40 p-3 shadow-inner transition-colors hover:border-slate-700">
-                      <span className="mb-1 text-[8px] uppercase leading-none tracking-wider text-slate-500">{key.replace(/_/g, ' ')}</span>
-                      <span className="text-[11px] font-mono font-bold text-indigo-300">{typeof value === 'number' ? value.toFixed(3) : String(value)}</span>
+                    <div key={key} className="flex flex-col justify-center rounded-lg border border-slate-200 bg-slate-50 p-3 transition-colors hover:border-indigo-200 hover:bg-indigo-50/40">
+                      <span className="mb-1 text-[9px] uppercase leading-none tracking-wider text-slate-400">{key.replace(/_/g, ' ')}</span>
+                      <span className="break-all text-[11px] font-mono font-bold text-indigo-700">{typeof value === 'number' ? value.toFixed(3) : String(value)}</span>
                     </div>
                   ))}
                 </div>
               ) : null}
               <details
                 data-testid="lammps-technical-details"
-                className="group mt-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/45"
+                className="group mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-50/70"
               >
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-slate-800/50 [&::-webkit-details-marker]:hidden">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-slate-100 [&::-webkit-details-marker]:hidden">
                   <div>
-                    <p className="text-xs font-semibold text-slate-200">技术详情</p>
+                    <p className="text-xs font-semibold text-slate-800">技术详情</p>
                     <p className="mt-1 text-[11px] text-slate-500">可信度、质量门、恢复、DAG 与 Red-Blue 审查</p>
                   </div>
-                  <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:hidden">
+                  <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-semibold text-slate-600 group-open:hidden">
                     展开
                   </span>
-                  <span className="hidden rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:inline-flex">
+                  <span className="hidden rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-semibold text-slate-600 group-open:inline-flex">
                     收起
                   </span>
                 </summary>
-                <div className="border-t border-slate-800 px-3 pb-3">
+                <div className="border-t border-slate-200 px-3 pb-3">
               <div
                 data-testid="lammps-execution-trust-card"
                 className={`mt-4 rounded-2xl border px-4 py-4 ${trustBadgeClasses(executionTrust.tone)}`}
@@ -2704,8 +2721,8 @@ export function ArtifactResultPanel({
           </div>
 
           <aside className="space-y-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-              <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Result Navigator</p>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">结果导航</p>
               <div className="mt-3 space-y-2">
                 {lammpsStages.map((stage, index) => {
                   const Icon = stage.kind === 'video' ? Film : stage.kind === 'markdown' ? FileText : ImageIcon
@@ -2717,17 +2734,17 @@ export function ArtifactResultPanel({
                       onClick={() => setSelectedArtifactName(stage.key)}
                       className={`w-full rounded-xl border px-3 py-3 text-left transition ${
                         active
-                          ? 'border-indigo-400/60 bg-indigo-500/10 text-slate-100'
-                          : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                          ? 'border-indigo-200 bg-indigo-50 text-indigo-900 shadow-sm'
+                          : 'border-slate-200 bg-slate-50/70 text-slate-600 hover:border-slate-300 hover:bg-white hover:text-slate-900'
                       }`}
                     >
                       <div className="flex items-center gap-3">
-                        <div className={`rounded-lg p-2 ${active ? 'bg-indigo-500/20 text-indigo-200' : 'bg-slate-800 text-slate-400'}`}>
+                        <div className={`rounded-lg p-2 ${active ? 'bg-indigo-100 text-indigo-700' : 'bg-white text-slate-500'}`}>
                           <Icon className="h-4 w-4" />
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm font-semibold">{index + 1}. {stage.title}</p>
-                          <p className="truncate text-[11px] uppercase tracking-[0.14em] text-slate-500">{stage.subtitle}</p>
+                          <p className="truncate text-[11px] uppercase tracking-[0.12em] text-slate-400">{stage.subtitle}</p>
                         </div>
                       </div>
                     </button>
@@ -2737,27 +2754,27 @@ export function ArtifactResultPanel({
             </div>
 
             {lammpsRagPreviewHits.length ? (
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Knowledge Grounding</p>
-                <p className="mt-2 text-xs leading-relaxed text-slate-400">
+              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-700">知识依据</p>
+                <p className="mt-2 text-xs leading-relaxed text-slate-500">
                   {lammpsRag.material ? `Material hint: ${lammpsRag.material}. ` : ''}
                   本轮 LAMMPS 请求解释和参数检查使用了这些 RAG 知识卡。
                 </p>
                 <div className="mt-3 space-y-2">
                   {lammpsRagPreviewHits.map(({ hit, stage }, index) => (
-                    <div key={`${stage}-${String(hit.title || 'rag')}-${index}`} className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-3">
+                    <div key={`${stage}-${String(hit.title || 'rag')}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-slate-200">{String(hit.title || 'Untitled knowledge card')}</p>
+                          <p className="truncate text-sm font-semibold text-slate-800">{String(hit.title || 'Untitled knowledge card')}</p>
                           <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-slate-500">
                             {stage} · {String(hit.doc_type || 'knowledge')}
                           </p>
                         </div>
-                        <span className="shrink-0 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                        <span className="shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
                           {formatRagScore(hit.score)}
                         </span>
                       </div>
-                      <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+                      <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
                         lexical {formatRagScore(hit.lexical_score)} · bm25 {formatRagScore(hit.bm25_score)} · vector {formatRagScore(hit.vector_score)}
                       </p>
                       {hit.source_url ? (
@@ -2765,7 +2782,7 @@ export function ArtifactResultPanel({
                           href={String(hit.source_url)}
                           target="_blank"
                           rel="noreferrer"
-                          className="mt-2 block truncate text-[11px] font-semibold text-indigo-300 hover:text-indigo-200"
+                          className="mt-2 block truncate text-[11px] font-semibold text-indigo-700 hover:text-indigo-900"
                         >
                           {String(hit.source || hit.source_url)}
                         </a>
@@ -2777,8 +2794,8 @@ export function ArtifactResultPanel({
             ) : null}
 
             {downloadArtifacts.length ? (
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Downloads</p>
+              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">文件下载</p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {downloadArtifacts.map((artifact) => (
                     <a
@@ -2787,7 +2804,7 @@ export function ArtifactResultPanel({
                       target="_blank"
                       rel="noreferrer"
                       download
-                      className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-[11px] font-semibold text-slate-100 transition hover:border-slate-500 hover:bg-slate-800"
+                      className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-semibold text-slate-700 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-800"
                     >
                       {artifact.name}
                     </a>
@@ -2797,25 +2814,25 @@ export function ArtifactResultPanel({
             ) : null}
 
             {isLoading ? (
-              <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-emerald-200">Streaming Outputs</p>
-                <p className="mt-2 text-sm leading-relaxed text-emerald-50">
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-amber-700">结果流式回传中</p>
+                <p className="mt-2 text-sm leading-relaxed text-amber-800">
                   这条任务正在逐步回传结果。后处理完成的图像、动画和报告会按顺序出现在左侧主预览与右侧导航中。
                 </p>
               </div>
             ) : null}
           </aside>
         </div>
-        <details className="group mx-4 mb-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/45">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-slate-800/50 [&::-webkit-details-marker]:hidden">
+        <details className="group mx-4 mb-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
             <div>
-              <p className="text-xs font-semibold text-slate-200">Agent 可观测信息</p>
+              <p className="text-xs font-semibold text-slate-800">Agent 可观测信息</p>
               <p className="mt-1 text-[11px] text-slate-500">Route、Tool、RAG、Memory 与 LLM 调用轨迹</p>
             </div>
-            <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:hidden">展开</span>
-            <span className="hidden rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:inline-flex">收起</span>
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[10px] font-semibold text-slate-600 group-open:hidden">展开</span>
+            <span className="hidden rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[10px] font-semibold text-slate-600 group-open:inline-flex">收起</span>
           </summary>
-          <div className="border-t border-slate-800 p-3">
+          <div className="border-t border-slate-200 bg-slate-50/50 p-3">
             <AgentObservabilityCard view={agentObservability} />
           </div>
         </details>
