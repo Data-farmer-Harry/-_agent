@@ -373,6 +373,23 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertEqual(decision["compute_domain"], "lammps")
         self.assertEqual(decision["intent"], "run_lammps_simulation")
 
+    def test_supervisor_understands_chinese_lammps_heating_request(self) -> None:
+        supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
+        state: AgentGraphState = {
+            "request": build_request("请用 LAMMPS 做一个 Cu 加热计算，从 300K 加热到 450K，600 steps，使用 EAM 势。"),
+            "messages": [],
+            "uploaded_assets": [],
+            "last_run_context": LastRunContext(),
+            "current_context_summary": "",
+        }
+
+        decision = supervisor.decide(state)
+
+        self.assertEqual(decision["route_name"], "lammps.generate")
+        self.assertEqual(decision["compute_domain"], "lammps")
+        self.assertEqual(decision["intent"], "run_lammps_simulation")
+        self.assertNotIn("task_type", decision.get("clarification_slots", []))
+
     def test_supervisor_uses_ambiguous_fallback_for_phase_and_lammps_overlap(self) -> None:
         supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
         state: AgentGraphState = {

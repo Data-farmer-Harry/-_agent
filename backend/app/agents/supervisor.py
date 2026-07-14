@@ -48,6 +48,7 @@ class SupervisorAgent:
         "md",
         "模拟",
         "势函数",
+        "加热",
         "升温",
         "equilibration",
         "heating",
@@ -74,7 +75,7 @@ class SupervisorAgent:
     LAMMPS_MATERIAL_PATTERN = re.compile(r"\b(al|cu|ni|aluminum|aluminium|copper|nickel)\b|铝|铜|镍", flags=re.IGNORECASE)
     LAMMPS_TEMPERATURE_PATTERN = re.compile(r"\b\d{2,5}\s*(?:k|kelvin)\b|温度\s*\d{2,5}|升到\s*\d{2,5}", flags=re.IGNORECASE)
     LAMMPS_STEPS_PATTERN = re.compile(r"\b\d{3,7}\s*steps?\b|\d{3,7}\s*步|步数\s*\d{3,7}", flags=re.IGNORECASE)
-    LAMMPS_TASK_PATTERN = re.compile(r"heating|heat|equilibration|equilibrate|升温|平衡|弛豫|nvt|npt", flags=re.IGNORECASE)
+    LAMMPS_TASK_PATTERN = re.compile(r"heating|heat|equilibration|equilibrate|加热|升温|平衡|弛豫|nvt|npt", flags=re.IGNORECASE)
     SYSTEM_PATTERN = re.compile(r"\b([A-Z][a-z]?\s*[-/]\s*[A-Z][a-z]?(?:\s*[-/]\s*[A-Z][a-z]?)?)\b")
 
     def __init__(self, llm_client: LLMClient | None = None) -> None:
@@ -702,6 +703,7 @@ class SupervisorAgent:
                     "3) If the user wants a new locally computed phase diagram without relying on uploaded image interpretation, choose phase_diagram.generate. "
                     "4) If the user wants molecular dynamics, trajectories, OVITO, or LAMMPS, choose lammps.generate. "
                     "4a) If the user asks how a LAMMPS command, potential, ensemble, or error works without asking to run a simulation, choose conversation.answer so the materials RAG can answer. "
+                    "4b) lammps.generate means real local LAMMPS execution by default. Never require the user to say 'real' or 'no mock'; mock is only an explicit developer/demo opt-in and must not be inferred from an ordinary simulation request. "
                     "5) Use conversation.answer only for normal discussion or pure follow-up explanation. "
                     "5a) If there is a recent phase-diagram run and the user asks to reopen, regenerate, or show the interactive HTML/result.html for that existing result, choose conversation.answer rather than phase_diagram.generate. "
                     "6) If there is a previous recognition result already in context and the user now asks to generate or redraw a corresponding computed phase diagram, choose phase_diagram.generate. "

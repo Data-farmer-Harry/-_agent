@@ -100,7 +100,9 @@ def detect_ovito_backend() -> dict[str, str | bool]:
 
 @dataclass
 class LammpsConfig:
-    allow_mock_fallback: bool = _env_bool("ALLOW_MOCK_FALLBACK", True)
+    # Product default: every LAMMPS request is a real local execution. Mock is
+    # an explicit developer/demo opt-in and must never be a silent fallback.
+    allow_mock_fallback: bool = _env_bool("ALLOW_MOCK_FALLBACK", False)
     force_mock: bool = _env_bool("USE_MOCK", False)
     lammps_command: str = _default_lammps_command()
     potentials_dir: str = _default_potentials_dir()

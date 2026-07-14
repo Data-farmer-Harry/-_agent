@@ -24,6 +24,45 @@ class _NoopMaterialsRagService:
 
 
 class LammpsQualityTests(unittest.TestCase):
+    def test_lammps_defaults_to_real_only_execution(self) -> None:
+        config = LammpsConfig()
+
+        self.assertFalse(config.allow_mock_fallback)
+        self.assertFalse(config.force_mock)
+
+    def test_mock_request_gate_distinguishes_demo_from_real_simulation(self) -> None:
+        self.assertFalse(LammpsRuntime._explicit_mock_requested("请用 LAMMPS 做 Cu 加热模拟。"))
+        self.assertFalse(LammpsRuntime._explicit_mock_requested("禁止 mock 和 synthetic fallback。"))
+        self.assertTrue(LammpsRuntime._explicit_mock_requested("请用 mock 演示模式跑一下界面流程。"))
+
+    def test_normal_request_cannot_silently_use_enabled_mock_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = LammpsRuntime(
+                artifact_service=ArtifactService(root_dir=Path(tmp)),
+                llm_client=ScriptedLLMClient(),
+                materials_rag_service=_NoopMaterialsRagService(),
+                config_loader=lambda: LammpsConfig(
+                    allow_mock_fallback=True,
+                    force_mock=False,
+                    lammps_command="/bin/echo",
+                    potentials_dir=str(Path(tmp)),
+                    max_retries=0,
+                    lammps_preflight_dag_enabled=False,
+                ),
+            )
+            with patch("app.runtimes.lammps.run_lammps", side_effect=RuntimeError("LAMMPS executable not found: test")):
+                result = runtime.run(
+                    run_id="lammps-real-only-policy",
+                    request=build_request("请用 LAMMPS 做 Cu heating，800K，1000 steps。"),
+                )
+
+        self.assertFalse(result.success)
+        self.assertNotEqual(result.metadata["run_mode"], "mock")
+        self.assertEqual(result.metadata["config"]["execution_policy"], "real_required")
+        self.assertFalse(result.metadata["config"]["allow_mock_fallback"])
+        self.assertFalse(result.metadata["config"]["explicit_mock_requested"])
+        self.assertNotIn("thermo.csv", {artifact.name for artifact in result.artifacts})
+
     def test_real_thermo_parser_fails_empty_stdout_without_seeding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             thermo_path = Path(tmp_dir) / "thermo.csv"

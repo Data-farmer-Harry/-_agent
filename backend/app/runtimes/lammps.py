@@ -231,6 +231,27 @@ class LammpsRuntime:
         )
 
     @staticmethod
+    def _explicit_mock_requested(message: str) -> bool:
+        """Return true only for an affirmative mock/demo request.
+
+        Generic Chinese "模拟" is intentionally not a trigger because it is
+        the normal word for a molecular-dynamics simulation.
+        """
+
+        normalized = (message or "").strip().lower()
+        if not normalized:
+            return False
+        negative = re.search(
+            r"(?:禁止|不要|不允许|拒绝|不能|不得|非|no|without|disable)\s*(?:使用|use)?\s*(?:mock|synthetic|假数据|合成数据)",
+            normalized,
+        )
+        if negative:
+            return False
+        return bool(
+            re.search(r"\bmock\b|\bsynthetic\b|仅演示|演示模式|演示数据|假数据|合成数据|demo\s+mode", normalized)
+        )
+
+    @staticmethod
     def _repair_stop_reason(state: dict[str, Any], default: str) -> str:
         history = state.get("repair_history")
         if not isinstance(history, list) or not history:
@@ -1745,7 +1766,17 @@ potentials_dir={config.potentials_dir}
         )
         clear_cancellation(run_id)
         config = self.config_loader()
-        state["config"] = self._lammps_config_payload(config)
+        explicit_mock_requested = self._explicit_mock_requested(request.message)
+        # `allow_mock_fallback` is only an authorization switch. A normal
+        # LAMMPS request remains real-only even if an old installation still
+        # has that switch enabled. `force_mock` is reserved for an explicit
+        # developer/test configuration.
+        config.allow_mock_fallback = bool(config.allow_mock_fallback and explicit_mock_requested)
+        state["config"] = {
+            **self._lammps_config_payload(config),
+            "execution_policy": "forced_mock_debug" if config.force_mock else "explicit_mock_demo" if config.allow_mock_fallback else "real_required",
+            "explicit_mock_requested": explicit_mock_requested,
+        }
         request_attempt: LammpsRequest | None = prestructured_request
         parse_info: dict[str, Any] = dict(prestructured_parse_info or {})
         max_retries = max(0, config.max_retries)

@@ -488,16 +488,24 @@ export function SystemSettingsPanel({
                     <input className={inputClassName()} value={lammpsConfig.ovito_location} onChange={(event) => setLammpsConfig({ ...lammpsConfig, ovito_location: event.target.value })} />
                     <p className="break-all text-xs leading-5 text-slate-500">当前后端识别：{lammpsConfig.ovito_available ? `${lammpsConfig.ovito_backend} · ${lammpsConfig.ovito_location}` : '未检测到 OVITO'}</p>
                   </SettingField>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <label className={checkboxLabelClassName()}>
-                      <span>允许 mock fallback</span>
-                      <input type="checkbox" checked={lammpsConfig.allow_mock_fallback} onChange={(event) => setLammpsConfig({ ...lammpsConfig, allow_mock_fallback: event.target.checked })} />
-                    </label>
-                    <label className={checkboxLabelClassName()}>
-                      <span>强制 mock 模式</span>
-                      <input type="checkbox" checked={lammpsConfig.force_mock} onChange={(event) => setLammpsConfig({ ...lammpsConfig, force_mock: event.target.checked })} />
-                    </label>
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs leading-5 text-emerald-800">
+                    默认执行策略：所有普通 LAMMPS 请求都使用真实本地运行。执行环境异常时返回诊断，不会静默生成 mock 或 synthetic 结果。
                   </div>
+                  <details className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50/70">
+                    <summary className="cursor-pointer list-none px-3 py-2.5 text-xs font-semibold text-slate-600 [&::-webkit-details-marker]:hidden">
+                      开发与演示模式（默认关闭）
+                    </summary>
+                    <div className="grid gap-3 border-t border-slate-200 p-3 sm:grid-cols-2">
+                      <label className={checkboxLabelClassName()}>
+                        <span>仅在请求明确要求 Mock 时允许 fallback</span>
+                        <input type="checkbox" checked={lammpsConfig.allow_mock_fallback} onChange={(event) => setLammpsConfig({ ...lammpsConfig, allow_mock_fallback: event.target.checked })} />
+                      </label>
+                      <label className={checkboxLabelClassName()}>
+                        <span>强制 mock（仅自动化测试）</span>
+                        <input type="checkbox" checked={lammpsConfig.force_mock} onChange={(event) => setLammpsConfig({ ...lammpsConfig, force_mock: event.target.checked })} />
+                      </label>
+                    </div>
+                  </details>
                   <SettingField label="最大重试次数">
                     <input className={inputClassName()} type="number" min={0} value={lammpsConfig.max_retries} onChange={(event) => setLammpsConfig({ ...lammpsConfig, max_retries: Number(event.target.value) || 0 })} />
                   </SettingField>

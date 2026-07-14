@@ -1121,7 +1121,10 @@ export function useAgentChat(settings: ClientSettings) {
 
   const loadResultHtml = useCallback(
     async (response: AgentRunResponse) => {
-      if (!responseCarriesRenderableArtifact(response)) {
+      // LAMMPS results are rendered from image/video/data artifacts and do not
+      // necessarily have an HTML result document. Only call the legacy
+      // /result endpoint when the response actually declares HTML content.
+      if (!hasHtmlArtifact(response)) {
         return
       }
       if (response.html_content) {
@@ -1199,7 +1202,7 @@ export function useAgentChat(settings: ClientSettings) {
       dispatch({ type: 'stream_event', event })
       if (event.type === 'run_completed') {
         const response = event.payload.response as AgentRunResponse | undefined
-        if (response && responseCarriesRenderableArtifact(response)) {
+        if (response && hasHtmlArtifact(response)) {
           void loadResultHtml(response).catch((error) => {
             dispatch({ type: 'run_failed', message: error instanceof Error ? error.message : '结果页面加载失败。' })
           })
@@ -1315,7 +1318,7 @@ export function useAgentChat(settings: ClientSettings) {
         try {
           const response = await runAgentChat(settings, payloadWithContext)
           dispatch({ type: 'response_received', response })
-          if (responseCarriesRenderableArtifact(response)) {
+          if (hasHtmlArtifact(response)) {
             await loadResultHtml(response)
           }
           await refreshRunHistory()
