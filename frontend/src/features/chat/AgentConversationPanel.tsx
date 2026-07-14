@@ -42,6 +42,8 @@ function renderInlineMarkdown(text: string, strongClassName = 'font-semibold tex
   const normalized = text
     .replace(/\\\*/g, '*')
     .replace(/\\\$/g, '$')
+    .replace(/\\_/g, '_')
+    .replace(/\\\|/g, '|')
     .replace(/\$(?:\\{1,2})?(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|phi|omega)\$/gi, (_, symbol: string) => greekSymbols[symbol.toLowerCase()] ?? symbol)
     .replace(/(?:\\{1,2})(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|phi|omega)\b/gi, (_, symbol: string) => greekSymbols[symbol.toLowerCase()] ?? symbol)
     .replace(/\$([A-Za-zΑ-ω0-9_+\-(),.%/ ]{1,80})\$/g, '$1');
@@ -65,6 +67,56 @@ function renderInlineMarkdown(text: string, strongClassName = 'font-semibold tex
   });
 }
 
+function splitMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  const cells: string[] = [];
+  let current = '';
+  let escaped = false;
+  let inCode = false;
+
+  for (const character of trimmed) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      current += character;
+      continue;
+    }
+    if (character === '`') {
+      inCode = !inCode;
+      current += character;
+      continue;
+    }
+    if (character === '|' && !inCode) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += character;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function markdownTableAlignment(cell: string): 'left' | 'center' | 'right' {
+  const value = cell.trim();
+  if (value.startsWith(':') && value.endsWith(':')) return 'center';
+  if (value.endsWith(':')) return 'right';
+  return 'left';
+}
+
+function isMarkdownTableStart(lines: string[], index: number): boolean {
+  if (index + 1 >= lines.length || !lines[index].includes('|')) return false;
+  const headers = splitMarkdownTableRow(lines[index]);
+  const separators = splitMarkdownTableRow(lines[index + 1]);
+  return headers.length >= 2
+    && headers.length === separators.length
+    && separators.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
 function renderMessageContent(
   content: string,
   options?: { textClassName?: string; strongClassName?: string; listItemClassName?: string },
@@ -85,6 +137,24 @@ function renderMessageContent(
       continue;
     }
 
+    if (line.startsWith('```')) {
+      const language = line.slice(3).trim();
+      const codeLines: string[] = [];
+      let codeIndex = index + 1;
+      while (codeIndex < lines.length && !lines[codeIndex].trim().startsWith('```')) {
+        codeLines.push(lines[codeIndex]);
+        codeIndex += 1;
+      }
+      blocks.push(
+        <div key={`code-block-${index}`} className="overflow-hidden rounded-xl border border-slate-200 bg-slate-950">
+          {language ? <div className="border-b border-slate-700 px-4 py-2 font-mono text-[11px] text-slate-400">{language}</div> : null}
+          <pre className="overflow-x-auto p-4 text-xs leading-6 text-slate-100"><code>{codeLines.join('\n')}</code></pre>
+        </div>,
+      );
+      index = codeIndex < lines.length ? codeIndex + 1 : codeIndex;
+      continue;
+    }
+
     const headingMatch = line.match(/^(#{1,3})\s+(.+)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
@@ -100,6 +170,77 @@ function renderMessageContent(
           {renderInlineMarkdown(title, strongClassName)}
         </h3>,
       );
+      index += 1;
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const headers = splitMarkdownTableRow(lines[index]);
+      const separators = splitMarkdownTableRow(lines[index + 1]);
+      const alignments = separators.map(markdownTableAlignment);
+      const rows: string[][] = [];
+      let tableIndex = index + 2;
+      while (tableIndex < lines.length && lines[tableIndex].trim() && lines[tableIndex].includes('|')) {
+        const cells = splitMarkdownTableRow(lines[tableIndex]);
+        rows.push(headers.map((_, cellIndex) => cells[cellIndex] ?? ''));
+        tableIndex += 1;
+      }
+      blocks.push(
+        <div key={`table-${index}`} className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+          <table className="w-full min-w-[520px] border-collapse text-left text-sm">
+            <thead className="bg-slate-50 text-slate-800">
+              <tr>
+                {headers.map((header, cellIndex) => (
+                  <th
+                    key={`table-head-${index}-${cellIndex}`}
+                    className="border-b border-slate-200 px-4 py-3 font-semibold"
+                    style={{ textAlign: alignments[cellIndex] }}
+                  >
+                    {renderInlineMarkdown(header, strongClassName)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-slate-700">
+              {rows.map((row, rowIndex) => (
+                <tr key={`table-row-${index}-${rowIndex}`} className="align-top even:bg-slate-50/50">
+                  {row.map((cell, cellIndex) => (
+                    <td
+                      key={`table-cell-${index}-${rowIndex}-${cellIndex}`}
+                      className="px-4 py-3 leading-6"
+                      style={{ textAlign: alignments[cellIndex] }}
+                    >
+                      {renderInlineMarkdown(cell, strongClassName)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      index = tableIndex;
+      continue;
+    }
+
+    if (/^>{1}\s?/.test(line)) {
+      const quoteLines: string[] = [];
+      let quoteIndex = index;
+      while (quoteIndex < lines.length && /^>{1}\s?/.test(lines[quoteIndex].trim())) {
+        quoteLines.push(lines[quoteIndex].trim().replace(/^>\s?/, ''));
+        quoteIndex += 1;
+      }
+      blocks.push(
+        <blockquote key={`quote-${index}`} className="rounded-r-xl border-l-4 border-indigo-300 bg-indigo-50/60 px-4 py-3 leading-7 text-slate-700">
+          {renderInlineMarkdown(quoteLines.join(' '), strongClassName)}
+        </blockquote>,
+      );
+      index = quoteIndex;
+      continue;
+    }
+
+    if (/^(?:-{3,}|\*{3,}|_{3,})$/.test(line)) {
+      blocks.push(<hr key={`rule-${index}`} className="my-4 border-slate-200" />);
       index += 1;
       continue;
     }
@@ -148,7 +289,16 @@ function renderMessageContent(
     let paragraphIndex = index;
     while (paragraphIndex < lines.length) {
       const candidate = lines[paragraphIndex].trim();
-      if (!candidate || /^(#{1,3})\s+/.test(candidate) || /^\d+\.\s+/.test(candidate) || /^[-*]\s+/.test(candidate)) {
+      if (
+        !candidate
+        || /^(#{1,3})\s+/.test(candidate)
+        || /^\d+\.\s+/.test(candidate)
+        || /^[-*]\s+/.test(candidate)
+        || candidate.startsWith('```')
+        || /^>\s?/.test(candidate)
+        || /^(?:-{3,}|\*{3,}|_{3,})$/.test(candidate)
+        || isMarkdownTableStart(lines, paragraphIndex)
+      ) {
         break;
       }
       paragraphLines.push(candidate);
@@ -366,6 +516,52 @@ export function AgentConversationPanel({
             const isUser = msg.role === 'user';
             const isWarning = msg.tone === 'warning';
             const isArtifact = msg.kind === 'artifact';
+            if (msg.kind === 'progress') {
+              const steps = msg.progressSteps || [];
+              const completedCount = steps.filter((step) => step.status === 'completed').length;
+              const failedCount = steps.filter((step) => step.status === 'failed').length;
+              return (
+                <div key={msg.id} className="flex justify-start" data-testid="completed-progress-card">
+                  <div className="w-full max-w-[min(1200px,94%)] rounded-2xl border border-emerald-100 bg-white px-5 py-4 shadow-sm shadow-emerald-100/60">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-emerald-100 bg-emerald-50 text-emerald-600">
+                          <ShieldCheck size={18} />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-slate-800">{msg.content}</p>
+                          <p className="mt-1 text-[11px] leading-5 text-slate-500">
+                            {failedCount ? `${completedCount} 个阶段完成，${failedCount} 个阶段失败` : `${completedCount}/${steps.length} 个阶段全部完成`}
+                          </p>
+                        </div>
+                      </div>
+                      <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${failedCount ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+                        {failedCount ? '执行结束' : '100%'}
+                      </span>
+                    </div>
+                    <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                      <div className={`h-full w-full rounded-full ${failedCount ? 'bg-rose-400' : 'bg-gradient-to-r from-indigo-500 via-blue-500 to-emerald-400'}`} />
+                    </div>
+                    {steps.length ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {steps.map((step) => (
+                          <div
+                            key={`${msg.runId || msg.id}-${step.index}`}
+                            className={`rounded-full border px-3 py-1 text-[11px] leading-5 ${
+                              step.status === 'failed'
+                                ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                            }`}
+                          >
+                            {step.index}. {step.label}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            }
             return (
               <div
                 key={msg.id}
@@ -457,7 +653,7 @@ export function AgentConversationPanel({
                     <p className="text-xs text-slate-500">
                       {liveProgress
                         ? liveProgress.percent === null
-                          ? `已记录 ${Math.max(liveProgress.steps.length, liveProgress.completed)} 个阶段，等待后端继续推进`
+                          ? `已完成 ${liveProgress.completed} 个动态阶段，后续步骤由路由继续生成`
                           : `已完成 ${liveProgress.completed}/${liveProgress.total} 步`
                         : '正在和后端保持同步'}
                     </p>
@@ -465,7 +661,7 @@ export function AgentConversationPanel({
                 </div>
                 {liveProgress ? (
                   <div className="rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-[11px] font-semibold text-indigo-600">
-                    处理中
+                    动态执行
                   </div>
                 ) : null}
               </div>

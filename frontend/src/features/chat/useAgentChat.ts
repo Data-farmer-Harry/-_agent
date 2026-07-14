@@ -45,7 +45,7 @@ export interface ConversationMessage {
   role: 'user' | 'assistant'
   tone: MessageTone
   content: string
-  kind?: 'text' | 'artifact' | 'recognition'
+  kind?: 'text' | 'artifact' | 'recognition' | 'progress'
   htmlContent?: string
   artifactStatus?: string
   recognitionResult?: RecognitionResult
@@ -56,6 +56,7 @@ export interface ConversationMessage {
   summary?: Record<string, unknown>
   metadata?: Record<string, unknown>
   attachments?: UploadedAsset[]
+  progressSteps?: LiveProgressStep[]
 }
 
 export interface LiveProgressStep {
@@ -333,6 +334,28 @@ function stepStatusLabel(toolName: string, failed: boolean): string {
   }
 }
 
+function completedStepStatusLabel(toolName: string, failed = false): string {
+  if (failed) {
+    return stepStatusLabel(toolName, true)
+  }
+  switch (toolName) {
+    case 'load_memory':
+      return '上下文记忆已加载'
+    case 'SupervisorAgent':
+      return '路由、置信度与 DAG 检查已完成'
+    case 'ChatAgent':
+      return '最终回答已生成'
+    case 'summarize_context':
+      return '上下文摘要已更新'
+    case 'save_memory':
+      return '会话记忆已保存'
+    case 'respond':
+      return '响应已整理完成'
+    default:
+      return `${stepStatusLabel(toolName, false).replace(/^正在/, '').replace(/。$/, '')}已完成`
+  }
+}
+
 function formatLiveStatus(stepIndex: number, label: string): string {
   return `步骤 ${stepIndex} · ${label}`
 }
@@ -347,6 +370,39 @@ function terminalMessageFromResponse(response: AgentRunResponse): ConversationMe
   }
 
   return makeAssistantMessage(response.final_message, response.success ? 'status' : 'warning')
+}
+
+function completedProgressMessageFromResponse(response: AgentRunResponse): ConversationMessage | null {
+  if (response.route.name !== 'conversation.answer') {
+    return null
+  }
+  const sourceSteps: PlanStep[] = response.plan_steps?.length
+    ? response.plan_steps
+    : (response.trace || []).map((observation) => ({
+        index: observation.step_index,
+        tool_name: observation.tool_name,
+        input: observation.input || {},
+        status: observation.success ? 'completed' : 'failed',
+        retryable: false,
+        description: observation.summary,
+      }))
+  if (!sourceSteps.length) {
+    return null
+  }
+  return {
+    id: createMessageId(),
+    role: 'assistant',
+    tone: response.success ? 'status' : 'warning',
+    content: response.success ? '本轮执行完成' : '本轮执行结束，但存在失败阶段',
+    kind: 'progress',
+    runId: response.run_id,
+    runStatus: response.run_status,
+    progressSteps: sourceSteps.map((step) => ({
+      index: step.index,
+      label: completedStepStatusLabel(step.tool_name, step.status === 'failed'),
+      status: step.status,
+    })),
+  }
 }
 
 
@@ -370,6 +426,10 @@ function responseMessagesFromRun(response: AgentRunResponse, extraMetadata: Reco
   const messages: ConversationMessage[] = []
   if (response.recognition_result && (response.route.name === 'recognition.analyze' || response.route.name === 'mixed.request')) {
     messages.push(makeRecognitionMessage(response.recognition_result))
+  }
+  const completedProgressMessage = completedProgressMessageFromResponse(response)
+  if (completedProgressMessage) {
+    messages.push(completedProgressMessage)
   }
   const artifactMessage = artifactMessageFromResponse(response, extraMetadata)
   if (artifactMessage) {
@@ -405,6 +465,13 @@ function mergeResponseMessages(
       })
       continue
     }
+    if (message.kind === 'progress') {
+      nextMessages = [
+        ...nextMessages.filter((existing) => existing.kind !== 'progress' || existing.runId !== message.runId),
+        message,
+      ]
+      continue
+    }
     nextMessages = [...nextMessages, message]
   }
   return nextMessages
@@ -412,12 +479,26 @@ function mergeResponseMessages(
 
 export function buildConversationHistory(messages: ConversationMessage[]): ConversationTurn[] {
   return messages
-    .filter((message) => message.kind !== 'artifact')
+    .filter((message) => message.kind !== 'artifact' && message.kind !== 'progress')
     .slice(-10)
     .map((message) => ({
       role: message.role,
       content: message.content.slice(0, 1200),
     }))
+}
+
+function insertProgressBeforeLatestAssistant(
+  messages: ConversationMessage[],
+  progressMessage: ConversationMessage,
+): ConversationMessage[] {
+  let insertAt = messages.length
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'assistant' && messages[index].kind !== 'artifact') {
+      insertAt = index
+      break
+    }
+  }
+  return [...messages.slice(0, insertAt), progressMessage, ...messages.slice(insertAt)]
 }
 
 function extractSystemNameFromTimeline(timeline: ToolObservation[]): string {
@@ -627,6 +708,13 @@ function buildStateFromConversationSnapshot(
     messages = [...messages, makeRecognitionMessage(snapshot.short_term.recognition_result)]
   }
   if (latestResponse) {
+    const progressMessage = completedProgressMessageFromResponse(latestResponse)
+    if (progressMessage) {
+      messages = insertProgressBeforeLatestAssistant(
+        messages.filter((message) => message.kind !== 'progress'),
+        progressMessage,
+      )
+    }
     const artifactMessage = artifactMessageFromResponse(latestResponse)
     if (artifactMessage) {
       messages = removeRedundantLammpsTerminalMessage(messages, latestResponse)
@@ -744,7 +832,14 @@ function responseFromRunRecord(record: RunRecordSummary): AgentRunResponse {
     route: record.route,
     final_message: record.final_message,
     artifacts: record.artifacts,
-    plan_steps: [],
+    plan_steps: record.trace.map((observation) => ({
+      index: observation.step_index,
+      tool_name: observation.tool_name,
+      input: observation.input || {},
+      status: observation.success ? 'completed' : 'failed',
+      retryable: false,
+      description: observation.summary,
+    })),
     trace: record.trace,
     generated_code: '',
     stdout: '',
@@ -797,7 +892,7 @@ function reducer(state: AgentChatState, action: Action): AgentChatState {
       return {
         ...state,
         messages: [
-          ...state.messages,
+          ...state.messages.filter((message) => message.kind !== 'progress'),
           {
             id: createMessageId(),
             role: 'user',
