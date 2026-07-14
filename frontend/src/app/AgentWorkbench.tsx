@@ -140,8 +140,7 @@ function buildConversationGroups(runHistory: RunRecordSummary[]): ConversationGr
         records,
         title: getRunLabel(titleSource),
       };
-    })
-    .sort((a, b) => new Date(b.latestRecord.updated_at).getTime() - new Date(a.latestRecord.updated_at).getTime());
+    });
 }
 
 export function AgentWorkbench() {

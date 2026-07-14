@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import api as api_module
 from app.config import settings
-from app.lammps.config import load_lammps_config, update_runtime_lammps_config
+from app.lammps.config import LammpsConfig, load_lammps_config, update_runtime_lammps_config
 from app.state import LastRunContext, UploadedAsset
 from tests.support import MINI_PNG_DATA_URL, ScriptedLLMClient, build_request
 
@@ -24,6 +24,19 @@ def _patch_api_llm_clients(stack: ExitStack) -> ScriptedLLMClient:
     stack.enter_context(patch.object(api_module.phase_diagram_runtime.codegen_service, "llm_client", scripted_llm))
     stack.enter_context(patch.object(api_module.phase_diagram_runtime.phase_agent_service, "llm_client", scripted_llm))
     stack.enter_context(patch.object(api_module.lammps_runtime, "llm_client", scripted_llm))
+    stack.enter_context(
+        patch.object(
+            api_module.lammps_runtime,
+            "config_loader",
+            lambda: LammpsConfig(
+                force_mock=True,
+                allow_mock_fallback=True,
+                lammps_command="",
+                potentials_dir="",
+                max_retries=1,
+            ),
+        )
+    )
     return scripted_llm
 
 
@@ -545,6 +558,7 @@ class HttpApiTests(unittest.TestCase):
                 run_id = payload["run_id"]
 
                 runs_response = client.get("/api/runs")
+                compact_runs_response = client.get("/api/runs?limit=1&compact=true")
                 summary_response = client.get(f"/api/runs/{run_id}")
                 artifact_response = client.get(f"/api/runs/{run_id}/artifacts/report.md")
                 cancel_response = client.post(f"/api/runs/{run_id}/cancel")
@@ -554,6 +568,11 @@ class HttpApiTests(unittest.TestCase):
         runs_payload = runs_response.json()
         self.assertGreaterEqual(runs_payload["count"], 1)
         self.assertTrue(any(item["run_id"] == run_id for item in runs_payload["runs"]))
+        self.assertEqual(compact_runs_response.status_code, 200)
+        compact_runs_payload = compact_runs_response.json()
+        self.assertEqual(compact_runs_payload["count"], 1)
+        self.assertEqual(compact_runs_payload["runs"][0]["artifacts"], [])
+        self.assertEqual(compact_runs_payload["runs"][0]["trace"], [])
 
         self.assertEqual(summary_response.status_code, 200)
         summary_payload = summary_response.json()

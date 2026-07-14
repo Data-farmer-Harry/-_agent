@@ -260,9 +260,22 @@ def create_app(dependencies: AppDependencies | None = None) -> FastAPI:
         return JSONResponse(public)
 
     @app.get("/api/runs")
-    def list_runs() -> JSONResponse:
-        records = deps.artifact_service.list_run_summaries()
-        return JSONResponse({"count": len(records), "runs": [record.model_dump(mode="json") for record in records]})
+    def list_runs(limit: int = 50, compact: bool = False) -> JSONResponse:
+        safe_limit = max(1, min(int(limit), 100))
+        records = deps.artifact_service.list_run_summaries(limit=safe_limit)
+        payloads = [record.model_dump(mode="json") for record in records]
+        if compact:
+            summary_keys = {"request_message", "request", "system_name", "diagram_type"}
+            for payload in payloads:
+                summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                planning = metadata.get("planning") if isinstance(metadata.get("planning"), dict) else None
+                payload["summary"] = {key: summary[key] for key in summary_keys if key in summary}
+                payload["metadata"] = {"planning": planning} if planning else {}
+                payload["artifacts"] = []
+                payload["trace"] = []
+                payload["final_message"] = str(payload.get("final_message") or "")[:500]
+        return JSONResponse({"count": len(payloads), "runs": payloads})
 
     @app.get("/api/runs/{run_id}")
     def run_summary(run_id: str) -> JSONResponse:

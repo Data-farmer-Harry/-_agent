@@ -451,15 +451,37 @@ class LammpsRuntime:
             elif alias in raw:
                 material = normalized
                 break
-        task_type = "heating" if any(token in raw for token in ("heat", "heating", "升温")) else "equilibration"
+        task_type = "heating" if any(token in raw for token in ("heat", "heating", "升温", "升到", "升至", "加热")) else "equilibration"
         potential_family = "lj" if "lj" in raw or "lennard-jones" in raw else "eam"
-        temperature_match = re.search(r"(\d{2,5})\s*(k|kelvin)", raw)
-        steps_match = re.search(r"(\d{3,7})\s*steps?", raw) or re.search(r"步数\s*(\d{3,7})", raw)
+        temperature_values = [
+            int(round(float(value)))
+            for value in re.findall(r"(\d{2,5}(?:\.\d+)?)\s*(?:k|kelvin)\b", raw)
+        ]
+        range_match = re.search(
+            r"(?:from|从)\s*(\d{2,5}(?:\.\d+)?)\s*(?:k|kelvin)\s*"
+            r"(?:to|[-~–—]|(?:升温?|加热)?(?:到|至))\s*"
+            r"(\d{2,5}(?:\.\d+)?)\s*(?:k|kelvin)\b",
+            raw,
+        )
+        initial_temperature: int | None = None
+        if range_match:
+            initial_temperature = int(round(float(range_match.group(1))))
+            target_temperature = int(round(float(range_match.group(2))))
+        elif task_type == "heating" and len(temperature_values) >= 2:
+            initial_temperature = temperature_values[0]
+            target_temperature = temperature_values[-1]
+        else:
+            target_temperature = temperature_values[0] if temperature_values else 900
+        steps_match = (
+            re.search(r"(\d{3,7})\s*steps?", raw)
+            or re.search(r"步数\s*(\d{3,7})", raw)
+            or re.search(r"(\d{3,7})\s*步", raw)
+        )
         request_payload = {
             "material": material,
             "potential_family": potential_family,
             "task_type": task_type,
-            "temperature": int(temperature_match.group(1)) if temperature_match else 900,
+            "temperature": target_temperature,
             "steps": int(steps_match.group(1)) if steps_match else 5000,
             "ensemble": "NVT",
             "box_size": 4,
@@ -467,6 +489,8 @@ class LammpsRuntime:
             "dump_file": "dump.atom",
             "notes": notes or message.strip(),
         }
+        if initial_temperature is not None:
+            request_payload["initial_temp"] = initial_temperature
         if attachment_overrides:
             request_payload.update({key: value for key, value in attachment_overrides.items() if value})
             if attachment_overrides.get("custom_potential_path"):
@@ -979,6 +1003,7 @@ class LammpsRuntime:
                 system_prompt=(
                     "You are the LammpsRuntime request interpreter for a true multi-agent materials system. "
                     "Convert the user request into conservative JSON for a single-metal LAMMPS demo. "
+                    "For a heating range such as 'from 300 K to 900 K', set initial_temp=300 and temperature=900. "
                     "Return JSON only with keys: material, potential_family, task_type, temperature, steps, ensemble, box_size, initial_temp, time_step, dump_file, custom_potential_path, custom_structure_path, custom_structure_format, notes, confidence."
                 ),
                 user_prompt=(
@@ -1003,6 +1028,17 @@ class LammpsRuntime:
             return LammpsRequest.model_validate(heuristic), {"source": "heuristic_request_interpreter", "confidence": 0.55}
 
         merged = {**heuristic, **{key: value for key, value in payload.items() if value not in (None, "")}}
+        explicit_temperatures = re.findall(r"\d{2,5}(?:\.\d+)?\s*(?:k|kelvin)\b", request.message.lower())
+        if explicit_temperatures:
+            # Explicit user temperatures are locked constraints. In particular,
+            # LLMs often mistake the first value in "from 300 K to 900 K" for
+            # the target; the deterministic parser has already separated the
+            # initial and target temperatures above.
+            merged["temperature"] = heuristic["temperature"]
+            if "initial_temp" in heuristic:
+                merged["initial_temp"] = heuristic["initial_temp"]
+        if re.search(r"(?:\d{3,7}\s*steps?|步数\s*\d{3,7}|\d{3,7}\s*步)", request.message.lower()):
+            merged["steps"] = heuristic["steps"]
         structured = LammpsRequest.model_validate(merged)
         confidence = payload.get("confidence", 0.82)
         try:

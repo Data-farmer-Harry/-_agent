@@ -167,7 +167,11 @@ export async function getRunResultHtml(settings: ClientSettings, runId: string):
 }
 
 export async function getRuns(settings: ClientSettings): Promise<RunListResponse> {
-  return requestJson<RunListResponse>(buildUrl(settings.apiBaseUrl, '/api/runs'), { method: 'GET' }, settings.requestTimeoutMs)
+  return requestJson<RunListResponse>(
+    buildUrl(settings.apiBaseUrl, '/api/runs?limit=20&compact=true'),
+    { method: 'GET', cache: 'no-store' },
+    settings.requestTimeoutMs,
+  )
 }
 
 export async function getLlmConfig(settings: ClientSettings): Promise<LlmRuntimeConfig> {

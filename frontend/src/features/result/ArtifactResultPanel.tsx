@@ -1792,10 +1792,6 @@ export function ArtifactResultPanel({
           </div>
         </div>
 
-        <div className="px-4 pt-4">
-          <AgentObservabilityCard view={agentObservability} />
-        </div>
-
         <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,2.35fr)_340px]">
           <div className="space-y-4">
             <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 shadow-inner">
@@ -1811,6 +1807,99 @@ export function ArtifactResultPanel({
                   </div>
                 ) : null}
               </div>
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold">
+                <span className={`rounded-full border px-3 py-1 ${trustBadgeClasses(executionTrust.tone)}`}>
+                  {executionTrust.label}
+                </span>
+                <span className={`rounded-full border px-3 py-1 ${qualityBadgeClasses(qualityTone)}`}>
+                  {qualityTitle}
+                </span>
+                <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-slate-300">
+                  science usable: {executionTrust.canUseAsScience ? 'yes' : 'no'}
+                </span>
+              </div>
+              <div data-testid="lammps-primary-result" className="mt-4 overflow-hidden rounded-xl border border-slate-800 bg-black/85">
+                {!selectedStage ? (
+                  <div className="flex h-[420px] items-center justify-center text-sm text-slate-500">
+                    当前还没有可预览的结果，后处理完成后会按阶段陆续放到这里。
+                  </div>
+                ) : selectedStage.kind === 'video' ? (
+                  <div className="relative flex h-[420px] items-center justify-center bg-black xl:h-[520px]">
+                    <video
+                      src={resolveArtifactUrl(settings, selectedStage.artifact.url || selectedStage.artifact.path)}
+                      className="h-full w-full object-contain"
+                      autoPlay
+                      loop
+                      muted
+                      controls
+                      playsInline
+                      preload="metadata"
+                      onError={() => {
+                        setVideoFailures((current) => ({ ...current, [selectedStage.artifact.name]: true }));
+                      }}
+                    />
+                    {videoFailures[selectedStage.artifact.name] ? (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-950/90 px-4 text-center">
+                        <Play className="w-8 h-8 text-amber-300" />
+                        <div className="space-y-1">
+                          <p className="text-xs font-semibold text-slate-100">MP4 预览加载失败</p>
+                          <p className="text-[11px] leading-relaxed text-slate-300">
+                            当前浏览器没有成功解码这个视频。你仍然可以查看 GIF 轨迹图，或直接下载 MP4 文件。
+                          </p>
+                        </div>
+                        <a
+                          href={resolveArtifactUrl(settings, selectedStage.artifact.url || selectedStage.artifact.path)}
+                          target="_blank"
+                          rel="noreferrer"
+                          download
+                          className="inline-flex items-center rounded-full border border-slate-600 bg-slate-900/80 px-3 py-1.5 text-[11px] font-semibold text-slate-100 transition hover:border-slate-400 hover:bg-slate-800"
+                        >
+                          下载 {selectedStage.artifact.name}
+                        </a>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : selectedStage.kind === 'image' ? (
+                  <div className="flex h-[420px] items-center justify-center bg-slate-950 xl:h-[520px]">
+                    <img
+                      src={resolveArtifactUrl(settings, selectedStage.artifact.url || selectedStage.artifact.path)}
+                      alt={selectedStage.artifact.name}
+                      className="h-full w-full object-contain"
+                    />
+                  </div>
+                ) : (
+                  <div className="max-h-[520px] overflow-auto p-5">
+                    <pre className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-200">{markdownText || '报告加载中…'}</pre>
+                  </div>
+                )}
+              </div>
+              {Object.keys(metrics).length > 0 ? (
+                <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+                  {Object.entries(metrics).map(([key, value]) => (
+                    <div key={key} className="flex flex-col justify-center rounded-lg border border-slate-800 bg-black/40 p-3 shadow-inner transition-colors hover:border-slate-700">
+                      <span className="mb-1 text-[8px] uppercase leading-none tracking-wider text-slate-500">{key.replace(/_/g, ' ')}</span>
+                      <span className="text-[11px] font-mono font-bold text-indigo-300">{typeof value === 'number' ? value.toFixed(3) : String(value)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              <details
+                data-testid="lammps-technical-details"
+                className="group mt-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/45"
+              >
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-slate-800/50 [&::-webkit-details-marker]:hidden">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-200">技术详情</p>
+                    <p className="mt-1 text-[11px] text-slate-500">可信度、质量门、恢复、DAG 与 Red-Blue 审查</p>
+                  </div>
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:hidden">
+                    展开
+                  </span>
+                  <span className="hidden rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:inline-flex">
+                    收起
+                  </span>
+                </summary>
+                <div className="border-t border-slate-800 px-3 pb-3">
               <div
                 data-testid="lammps-execution-trust-card"
                 className={`mt-4 rounded-2xl border px-4 py-4 ${trustBadgeClasses(executionTrust.tone)}`}
@@ -2607,74 +2696,11 @@ export function ArtifactResultPanel({
                   ) : null}
                 </div>
               ) : null}
+                </div>
+              </details>
 
-              <div className="mt-4 overflow-hidden rounded-xl border border-slate-800 bg-black/85">
-                {!selectedStage ? (
-                  <div className="flex h-[420px] items-center justify-center text-sm text-slate-500">
-                    当前还没有可预览的结果，后处理完成后会按阶段陆续放到这里。
-                  </div>
-                ) : selectedStage.kind === 'video' ? (
-                  <div className="relative flex h-[420px] items-center justify-center bg-black xl:h-[520px]">
-                    <video
-                      src={resolveArtifactUrl(settings, selectedStage.artifact.url || selectedStage.artifact.path)}
-                      className="h-full w-full object-contain"
-                      autoPlay
-                      loop
-                      muted
-                      controls
-                      playsInline
-                      preload="metadata"
-                      onError={() => {
-                        setVideoFailures((current) => ({ ...current, [selectedStage.artifact.name]: true }));
-                      }}
-                    />
-                    {videoFailures[selectedStage.artifact.name] ? (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-950/90 px-4 text-center">
-                        <Play className="w-8 h-8 text-amber-300" />
-                        <div className="space-y-1">
-                          <p className="text-xs font-semibold text-slate-100">MP4 预览加载失败</p>
-                          <p className="text-[11px] leading-relaxed text-slate-300">
-                            当前浏览器没有成功解码这个视频。你仍然可以查看 GIF 轨迹图，或直接下载 MP4 文件。
-                          </p>
-                        </div>
-                        <a
-                          href={resolveArtifactUrl(settings, selectedStage.artifact.url || selectedStage.artifact.path)}
-                          target="_blank"
-                          rel="noreferrer"
-                          download
-                          className="inline-flex items-center rounded-full border border-slate-600 bg-slate-900/80 px-3 py-1.5 text-[11px] font-semibold text-slate-100 transition hover:border-slate-400 hover:bg-slate-800"
-                        >
-                          下载 {selectedStage.artifact.name}
-                        </a>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : selectedStage.kind === 'image' ? (
-                  <div className="flex h-[420px] items-center justify-center bg-slate-950 xl:h-[520px]">
-                    <img
-                      src={resolveArtifactUrl(settings, selectedStage.artifact.url || selectedStage.artifact.path)}
-                      alt={selectedStage.artifact.name}
-                      className="h-full w-full object-contain"
-                    />
-                  </div>
-                ) : (
-                  <div className="max-h-[520px] overflow-auto p-5">
-                    <pre className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-200">{markdownText || '报告加载中…'}</pre>
-                  </div>
-                )}
-              </div>
             </div>
 
-            {Object.keys(metrics).length > 0 && (
-              <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-                {Object.entries(metrics).map(([key, value]) => (
-                  <div key={key} className="p-3 bg-black/40 rounded-lg border border-slate-800 flex flex-col justify-center shadow-inner hover:border-slate-700 transition-colors">
-                    <span className="text-[8px] text-slate-500 leading-none mb-1 uppercase tracking-wider">{key.replace(/_/g, ' ')}</span>
-                    <span className="text-[11px] font-mono text-indigo-300 font-bold">{typeof value === 'number' ? value.toFixed(3) : String(value)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
 
           <aside className="space-y-4">
@@ -2780,6 +2806,19 @@ export function ArtifactResultPanel({
             ) : null}
           </aside>
         </div>
+        <details className="group mx-4 mb-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/45">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-slate-800/50 [&::-webkit-details-marker]:hidden">
+            <div>
+              <p className="text-xs font-semibold text-slate-200">Agent 可观测信息</p>
+              <p className="mt-1 text-[11px] text-slate-500">Route、Tool、RAG、Memory 与 LLM 调用轨迹</p>
+            </div>
+            <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:hidden">展开</span>
+            <span className="hidden rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-semibold text-slate-300 group-open:inline-flex">收起</span>
+          </summary>
+          <div className="border-t border-slate-800 p-3">
+            <AgentObservabilityCard view={agentObservability} />
+          </div>
+        </details>
       </div>
     );
   }

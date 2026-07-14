@@ -376,7 +376,10 @@ function responseMessagesFromRun(response: AgentRunResponse, extraMetadata: Reco
     messages.push(artifactMessage)
   }
   const terminalMessage = terminalMessageFromResponse(response)
-  if (terminalMessage) {
+  const resultPanelAlreadyExplainsSuccessfulLammpsRun = Boolean(
+    artifactMessage && response.success && response.route.name === 'lammps.generate',
+  )
+  if (terminalMessage && !resultPanelAlreadyExplainsSuccessfulLammpsRun) {
     messages.push(terminalMessage)
   }
   return messages
@@ -594,6 +597,22 @@ function attachAssetsToLatestUserMessage(
   return [...messages.slice(0, targetIndex), patchedMessage, ...messages.slice(targetIndex + 1)]
 }
 
+function removeRedundantLammpsTerminalMessage(
+  messages: ConversationMessage[],
+  response: AgentRunResponse,
+): ConversationMessage[] {
+  if (!response.success || response.route.name !== 'lammps.generate' || !response.final_message.trim()) {
+    return messages
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role === 'assistant' && message.kind !== 'artifact' && message.content.trim() === response.final_message.trim()) {
+      return [...messages.slice(0, index), ...messages.slice(index + 1)]
+    }
+  }
+  return messages
+}
+
 function buildStateFromConversationSnapshot(
   snapshot: ConversationSnapshotResponse,
   selectedResponse?: AgentRunResponse,
@@ -610,6 +629,7 @@ function buildStateFromConversationSnapshot(
   if (latestResponse) {
     const artifactMessage = artifactMessageFromResponse(latestResponse)
     if (artifactMessage) {
+      messages = removeRedundantLammpsTerminalMessage(messages, latestResponse)
       messages = mergeResponseMessages(messages, latestResponse, [artifactMessage])
     }
   }

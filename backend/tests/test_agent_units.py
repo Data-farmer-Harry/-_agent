@@ -484,6 +484,46 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertIn("温度", result["final_answer"])
         self.assertIn("步数", result["final_answer"])
 
+    def test_chat_agent_uses_concise_deterministic_lammps_completion(self) -> None:
+        llm = ScriptedLLMClient()
+        agent = ChatAgent(llm_client=llm)
+        state: AgentGraphState = {
+            "request": build_request("请用 LAMMPS 做 Cu heating，700K，1200 steps。"),
+            "messages": [],
+            "last_run_context": LastRunContext(),
+            "supervisor_decision": {"route_name": "lammps.generate", "intent": "run_lammps_simulation"},
+            "current_context_summary": "",
+            "lammps_result": AgentRunResponse(
+                success=True,
+                run_id="real-run-1",
+                route=TaskRoute(name="lammps.generate", compute_domain="lammps"),
+                final_message="runtime complete",
+                stdout="",
+                stderr="",
+                summary={
+                    "mode": "real",
+                    "request": {
+                        "material": "Cu",
+                        "task_type": "heating",
+                        "initial_temp": 300,
+                        "temperature": 700,
+                        "steps": 1200,
+                    },
+                    "metrics": {"final_temp": 709.556},
+                    "quality": {"run_mode": "real", "scientific_result_passed": True},
+                },
+            ),
+        }
+
+        result = agent.run(state)
+
+        self.assertEqual(result["response_metadata"]["chat_prompt_mode"], "deterministic_lammps_summary")
+        self.assertEqual(result["response_metadata"]["chat_max_tokens"], 0)
+        self.assertLess(len(result["final_answer"]), 140)
+        self.assertIn("真实 LAMMPS 已完成", result["final_answer"])
+        self.assertIn("GIF、MP4", result["final_answer"])
+        self.assertEqual(llm.calls, [])
+
     def test_supervisor_routes_phase_html_follow_up_to_chat(self) -> None:
         supervisor = SupervisorAgent(llm_client=ScriptedLLMClient())
         state: AgentGraphState = {
@@ -916,6 +956,32 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
         self.assertEqual(diagram_request.temperature_max, 980.0)
         self.assertIn("recognized_phases=FCC_A1, HCP_A3, LIQUID", diagram_request.notes)
         self.assertEqual(planning["source"], "llm_request_interpreter")
+
+    def test_lammps_request_parser_preserves_explicit_heating_range_over_llm_drift(self) -> None:
+        runtime = LammpsRuntime(
+            artifact_service=ArtifactService(root_dir=Path(tempfile.mkdtemp())),
+            llm_client=ScriptedLLMClient(),
+        )
+        request = build_request("请用 LAMMPS 做一个 Ni 的 heating 模拟，从 300K 升到 900K，6000 steps。")
+
+        parsed, planning = runtime._parse_request(request)
+
+        self.assertEqual(parsed.task_type, "heating")
+        self.assertEqual(parsed.initial_temp, 300)
+        self.assertEqual(parsed.temperature, 900)
+        self.assertEqual(parsed.steps, 6000)
+        self.assertEqual(planning["source"], "llm_request_interpreter")
+
+    def test_lammps_heuristic_parser_understands_chinese_heating_and_step_units(self) -> None:
+        parsed = LammpsRuntime._heuristic_request(
+            "对 Cu 从 450 K 加热到 1000 K，共运行 2500 步。",
+            "",
+        )
+
+        self.assertEqual(parsed["task_type"], "heating")
+        self.assertEqual(parsed["initial_temp"], 450)
+        self.assertEqual(parsed["temperature"], 1000)
+        self.assertEqual(parsed["steps"], 2500)
 
     def test_compute_agent_does_not_append_runtime_message_before_chat(self) -> None:
         class StubPhaseRuntime:

@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from app.core.llm import LLMClient
+from app.core.llm_routing import LLMRouter, LLMRoutingConfig
 from app.config import settings
 
 
@@ -51,7 +52,7 @@ class LLMClientTests(unittest.TestCase):
         settings.llm_request_max_retries = 0
         settings.llm_max_tokens = 2048
         try:
-            client = LLMClient()
+            client = LLMClient(router=LLMRouter(LLMRoutingConfig(enabled=False)))
             with patch("app.core.llm.urllib_request.urlopen", side_effect=fake_urlopen):
                 content = client.chat_text(system_prompt="sys", user_prompt="hello", max_tokens=100)
         finally:

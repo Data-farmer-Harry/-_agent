@@ -29,6 +29,8 @@ def _default_lammps_command() -> str:
         "/opt/homebrew/bin/lmp",
         "/opt/homebrew/bin/lmp_serial",
         "/opt/homebrew/bin/lmp_mpi",
+        "/opt/homebrew/opt/lammps/bin/lmp_serial",
+        "/opt/homebrew/opt/lammps/bin/lmp_mpi",
     ):
         if candidate and Path(candidate).exists():
             return candidate

@@ -874,6 +874,44 @@ class ChatAgent:
         snippets.append("这些内容是知识增强结果，不会覆盖真实 registry、参数校验或本地计算链路。")
         return "\n".join(snippets)
 
+    @staticmethod
+    def _build_concise_lammps_completion(state: AgentGraphState) -> str | None:
+        result = state.get("lammps_result")
+        if result is None:
+            return None
+
+        summary = result.summary if isinstance(result.summary, dict) else {}
+        request_payload = summary.get("request") if isinstance(summary.get("request"), dict) else {}
+        metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+        quality = summary.get("quality") if isinstance(summary.get("quality"), dict) else {}
+        mode = str(summary.get("mode") or quality.get("run_mode") or "unknown")
+
+        if not result.success:
+            return "LAMMPS 本轮未通过完整执行或质量检查；错误、日志和已有产物已保留在结果区。"
+        if mode != "real":
+            return "本轮是 mock 流程演示，不可作为科学结果；结果区仅保留静态图和基础产物。"
+
+        material = str(request_payload.get("material") or "材料")
+        task_type = str(request_payload.get("task_type") or "simulation")
+        initial_temp = request_payload.get("initial_temp")
+        target_temp = request_payload.get("temperature")
+        steps = request_payload.get("steps")
+        final_temp = metrics.get("final_temp")
+        quality_passed = bool(quality.get("scientific_result_passed"))
+
+        conditions: list[str] = []
+        if isinstance(initial_temp, (int, float)) and isinstance(target_temp, (int, float)):
+            conditions.append(f"{initial_temp:g}→{target_temp:g} K")
+        elif isinstance(target_temp, (int, float)):
+            conditions.append(f"{target_temp:g} K")
+        if isinstance(steps, (int, float)):
+            conditions.append(f"{steps:g} steps")
+
+        metric_text = f"最终温度 {final_temp:.1f} K" if isinstance(final_temp, (int, float)) else "结果已返回"
+        quality_text = "质量门通过" if quality_passed else "请查看质量提示"
+        condition_text = f"，{' / '.join(conditions)}" if conditions else ""
+        return f"真实 LAMMPS 已完成：{material} {task_type}{condition_text}；{metric_text}，{quality_text}。GIF、MP4、热力学图和轨迹已放在结果区。"
+
     def _build_fallback_answer(self, state: AgentGraphState, contextual_answer: str | None) -> str:
         request = state["request"]
         tool_answer = self._build_tool_result_answer(state)
@@ -1050,6 +1088,7 @@ class ChatAgent:
             }
 
         contextual_answer = self._build_contextual_answer(state)
+        concise_lammps_answer = self._build_concise_lammps_completion(state)
         materials_rag_payload = self._resolve_materials_rag(state, contextual_answer)
         materials_rag_context = str(materials_rag_payload.get("context") or "")
         supervisor_intent = str((state.get("supervisor_decision") or {}).get("intent") or "")
@@ -1074,7 +1113,11 @@ class ChatAgent:
         )
         chat_prompt_mode = "deterministic_clarification" if deterministic_clarification else "full_context"
         chat_max_tokens = 0 if deterministic_clarification else 1200
-        if deterministic_clarification and contextual_answer is not None:
+        if concise_lammps_answer is not None:
+            chat_prompt_mode = "deterministic_lammps_summary"
+            chat_max_tokens = 0
+            answer = concise_lammps_answer
+        elif deterministic_clarification and contextual_answer is not None:
             answer = contextual_answer
         elif not self.llm_client.is_configured():
             if settings.require_llm_for_agents:

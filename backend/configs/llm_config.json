@@ -32,7 +32,7 @@
   "artifact_retention_keep_latest": 120,
   "artifact_retention_max_age_days": 30,
   "force_mock": false,
-  "allow_mock_fallback": true,
+  "allow_mock_fallback": false,
   "max_retries": 1,
   "lammps_multifidelity_enabled": false,
   "llm_enabled": true,
