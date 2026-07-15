@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820" role="img" aria-labelledby="title desc">
+  <title id="title">LAMMPS molecular dynamics pipeline</title>
+  <desc id="desc">A materials simulation workflow from crystal structure and interatomic potential through molecular dynamics to validated scientific artifacts.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8faff"/>
+      <stop offset="1" stop-color="#eef3fb"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7769e8"/>
+      <stop offset="1" stop-color="#5146c8"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#65d8dc"/>
+      <stop offset="1" stop-color="#2aa6bd"/>
+    </linearGradient>
+    <radialGradient id="cu" cx="35%" cy="28%" r="72%">
+      <stop offset="0" stop-color="#ffd4a8"/>
+      <stop offset="0.38" stop-color="#df8a42"/>
+      <stop offset="1" stop-color="#9c4c22"/>
+    </radialGradient>
+    <radialGradient id="ni" cx="35%" cy="28%" r="72%">
+      <stop offset="0" stop-color="#d9f6ff"/>
+      <stop offset="0.4" stop-color="#70b9df"/>
+      <stop offset="1" stop-color="#315d9d"/>
+    </radialGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#7b8bb2" stroke-opacity="0.07"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#25335b" flood-opacity="0.11"/>
+    </filter>
+    <filter id="atomShadow" x="-80%" y="-80%" width="260%" height="260%">
+      <feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#1e2d50" flood-opacity="0.2"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#6b62dc"/>
+    </marker>
+    <marker id="forceArrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0 0L8 4L0 8Z" fill="#22a9b9"/>
+    </marker>
+    <g id="atomCu"><circle r="17" fill="url(#cu)" filter="url(#atomShadow)"/><circle cx="-5" cy="-6" r="4" fill="#fff" opacity="0.55"/></g>
+    <g id="atomNi"><circle r="17" fill="url(#ni)" filter="url(#atomShadow)"/><circle cx="-5" cy="-6" r="4" fill="#fff" opacity="0.58"/></g>
+  </defs>
+
+  <rect width="1600" height="820" rx="28" fill="url(#bg)"/>
+  <rect width="1600" height="820" rx="28" fill="url(#grid)"/>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="72" y="62" font-size="14" font-weight="700" letter-spacing="3.6" fill="#6259ce">REAL SCIENTIFIC COMPUTE</text>
+    <text x="72" y="108" font-size="36" font-weight="750" fill="#17213b">LAMMPS Molecular Dynamics Pipeline</text>
+    <text x="72" y="140" font-size="18" fill="#63708d">From a typed simulation request to auditable physical evidence and reusable artifacts.</text>
+
+    <g filter="url(#shadow)">
+      <rect x="70" y="185" width="430" height="435" rx="26" fill="#fff"/>
+      <rect x="535" y="185" width="530" height="435" rx="26" fill="#fff"/>
+      <rect x="1100" y="185" width="430" height="435" rx="26" fill="#fff"/>
+    </g>
+
+    <g>
+      <circle cx="106" cy="225" r="18" fill="#eeeafd"/>
+      <text x="106" y="231" text-anchor="middle" font-size="14" font-weight="750" fill="#6259ce">01</text>
+      <text x="137" y="231" font-size="19" font-weight="720" fill="#1a2541">Structure &amp; potential</text>
+      <text x="104" y="266" font-size="14" fill="#71809c">Periodic cell · species · force field · ensemble</text>
+
+      <g stroke="#a7b4d0" stroke-width="2" fill="none" opacity="0.8">
+        <path d="M154 348L328 315L410 365L235 401Z"/>
+        <path d="M154 348V487L235 540V401"/>
+        <path d="M235 401L410 365V504L235 540"/>
+        <path d="M328 315V452L410 504" stroke-dasharray="6 6"/>
+        <path d="M154 487L328 452L410 504" stroke-dasharray="6 6"/>
+      </g>
+      <g stroke="#b9c4dc" stroke-width="1.5" opacity="0.62">
+        <path d="M194 332L276 382L368 347"/><path d="M194 401L276 451L368 416"/>
+        <path d="M194 470L276 520L368 485"/><path d="M194 332V470"/><path d="M276 382V520"/><path d="M368 347V485"/>
+      </g>
+      <use href="#atomCu" x="154" y="348"/><use href="#atomNi" x="235" y="401"/>
+      <use href="#atomCu" x="328" y="315"/><use href="#atomNi" x="410" y="365"/>
+      <use href="#atomNi" x="194" y="401"/><use href="#atomCu" x="276" y="451"/>
+      <use href="#atomNi" x="368" y="416"/><use href="#atomCu" x="154" y="487"/>
+      <use href="#atomNi" x="235" y="540"/><use href="#atomCu" x="328" y="452"/>
+      <use href="#atomNi" x="410" y="504"/><use href="#atomCu" x="276" y="382"/>
+
+      <rect x="105" y="568" width="110" height="30" rx="15" fill="#fff3e9"/>
+      <circle cx="123" cy="583" r="6" fill="#d77b34"/><text x="137" y="588" font-size="12" font-weight="650" fill="#7a4827">Cu atoms</text>
+      <rect x="226" y="568" width="110" height="30" rx="15" fill="#edf7ff"/>
+      <circle cx="244" cy="583" r="6" fill="#4f91c5"/><text x="258" y="588" font-size="12" font-weight="650" fill="#315d87">Ni atoms</text>
+      <rect x="347" y="568" width="118" height="30" rx="15" fill="#f0eefc"/>
+      <text x="406" y="588" text-anchor="middle" font-size="12" font-weight="650" fill="#6259ce">EAM / MEAM</text>
+    </g>
+
+    <path d="M504 402H529" stroke="#6b62dc" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <g>
+      <circle cx="571" cy="225" r="18" fill="#e8f8fa"/>
+      <text x="571" y="231" text-anchor="middle" font-size="14" font-weight="750" fill="#188c9f">02</text>
+      <text x="602" y="231" font-size="19" font-weight="720" fill="#1a2541">Molecular dynamics</text>
+      <text x="569" y="266" font-size="14" fill="#71809c">Neighbor list · forces · integration · thermostat</text>
+
+      <rect x="579" y="300" width="442" height="260" rx="22" fill="#f4f7fc" stroke="#d9e0ee"/>
+      <path d="M607 331H989V529H607Z" fill="none" stroke="#8d9abb" stroke-width="2" stroke-dasharray="8 7"/>
+      <g stroke="#c6cfdf" stroke-width="2" opacity="0.7">
+        <path d="M660 374L737 346L815 389L895 354L963 410"/>
+        <path d="M641 457L719 421L798 469L884 430L952 481"/>
+        <path d="M660 374L641 457M737 346L719 421M815 389L798 469M895 354L884 430M963 410L952 481"/>
+      </g>
+      <g fill="none" stroke="#9eaed0" stroke-width="3" stroke-linecap="round" opacity="0.45">
+        <path d="M629 367Q645 359 660 374"/><path d="M701 350Q720 336 737 346"/>
+        <path d="M777 405Q798 397 815 389"/><path d="M858 340Q878 342 895 354"/>
+        <path d="M926 394Q948 390 963 410"/><path d="M609 472Q625 466 641 457"/>
+        <path d="M686 439Q704 431 719 421"/><path d="M764 480Q782 478 798 469"/>
+        <path d="M850 447Q869 440 884 430"/><path d="M918 493Q938 491 952 481"/>
+      </g>
+      <use href="#atomCu" x="660" y="374"/><use href="#atomNi" x="737" y="346"/>
+      <use href="#atomCu" x="815" y="389"/><use href="#atomNi" x="895" y="354"/><use href="#atomCu" x="963" y="410"/>
+      <use href="#atomNi" x="641" y="457"/><use href="#atomCu" x="719" y="421"/>
+      <use href="#atomNi" x="798" y="469"/><use href="#atomCu" x="884" y="430"/><use href="#atomNi" x="952" y="481"/>
+      <g stroke="#22a9b9" stroke-width="2.5" marker-end="url(#forceArrow)" opacity="0.9">
+        <path d="M675 365L704 342"/><path d="M802 375L778 350"/><path d="M910 351L943 336"/>
+        <path d="M705 431L682 456"/><path d="M812 472L841 493"/><path d="M938 472L914 447"/>
+      </g>
+      <rect x="607" y="576" width="120" height="28" rx="14" fill="#eaf8f9"/>
+      <text x="667" y="595" text-anchor="middle" font-size="12" font-weight="650" fill="#197f90">Velocity Verlet</text>
+      <rect x="738" y="576" width="116" height="28" rx="14" fill="#f0eefc"/>
+      <text x="796" y="595" text-anchor="middle" font-size="12" font-weight="650" fill="#6259ce">NVT / NPT</text>
+      <rect x="865" y="576" width="156" height="28" rx="14" fill="#edf2fa"/>
+      <text x="943" y="595" text-anchor="middle" font-size="12" font-weight="650" fill="#51617e">real execution only</text>
+    </g>
+
+    <path d="M1069 402H1094" stroke="#6b62dc" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <g>
+      <circle cx="1136" cy="225" r="18" fill="#eeeafd"/>
+      <text x="1136" y="231" text-anchor="middle" font-size="14" font-weight="750" fill="#6259ce">03</text>
+      <text x="1167" y="231" font-size="19" font-weight="720" fill="#1a2541">Validated outputs</text>
+      <text x="1134" y="266" font-size="14" fill="#71809c">Quality gate · provenance · reusable artifacts</text>
+
+      <rect x="1134" y="301" width="362" height="165" rx="18" fill="#f7f8fd" stroke="#dfe4f0"/>
+      <line x1="1170" y1="429" x2="1464" y2="429" stroke="#c7d0e2"/>
+      <line x1="1170" y1="329" x2="1170" y2="429" stroke="#c7d0e2"/>
+      <path d="M1171 395C1200 383 1220 398 1247 370S1300 354 1328 365S1380 389 1408 349S1442 339 1464 346" fill="none" stroke="url(#violet)" stroke-width="5" stroke-linecap="round"/>
+      <path d="M1171 412C1210 410 1231 402 1262 407S1320 393 1352 397S1417 384 1464 390" fill="none" stroke="#35b8be" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+      <circle cx="1408" cy="349" r="6" fill="#675bd9"/><circle cx="1352" cy="397" r="5" fill="#35b8be"/>
+
+      <g>
+        <rect x="1134" y="485" width="170" height="45" rx="14" fill="#edf8f4"/>
+        <circle cx="1157" cy="507" r="8" fill="#40ad83"/>
+        <path d="M1153 507L1156 510L1162 503" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="1174" y="512" font-size="13" font-weight="680" fill="#27795e">physical checks</text>
+        <rect x="1318" y="485" width="178" height="45" rx="14" fill="#f0eefc"/>
+        <circle cx="1342" cy="507" r="8" fill="#6b62dc"/>
+        <path d="M1338 507L1341 510L1347 503" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="1359" y="512" font-size="13" font-weight="680" fill="#5148b0">real provenance</text>
+      </g>
+      <g font-size="12" font-weight="650">
+        <rect x="1134" y="550" width="78" height="32" rx="16" fill="#edf2fa"/><text x="1173" y="571" text-anchor="middle" fill="#51617e">thermo</text>
+        <rect x="1220" y="550" width="72" height="32" rx="16" fill="#edf2fa"/><text x="1256" y="571" text-anchor="middle" fill="#51617e">dump</text>
+        <rect x="1300" y="550" width="68" height="32" rx="16" fill="#edf2fa"/><text x="1334" y="571" text-anchor="middle" fill="#51617e">plot</text>
+        <rect x="1376" y="550" width="54" height="32" rx="16" fill="#edf2fa"/><text x="1403" y="571" text-anchor="middle" fill="#51617e">GIF</text>
+        <rect x="1438" y="550" width="58" height="32" rx="16" fill="#edf2fa"/><text x="1467" y="571" text-anchor="middle" fill="#51617e">MP4</text>
+      </g>
+    </g>
+
+    <g>
+      <rect x="70" y="662" width="1460" height="104" rx="24" fill="#18233e"/>
+      <text x="104" y="703" font-size="12" font-weight="700" letter-spacing="2.2" fill="#8edfe2">AUDITABLE EXECUTION PATH</text>
+      <g font-size="14" font-weight="650" fill="#eef3ff">
+        <rect x="104" y="721" width="218" height="30" rx="15" fill="#2a3656"/><text x="213" y="741" text-anchor="middle">Natural-language request</text>
+        <path d="M334 736H370" stroke="#8a82ee" stroke-width="2" marker-end="url(#arrow)"/>
+        <rect x="382" y="721" width="202" height="30" rx="15" fill="#2a3656"/><text x="483" y="741" text-anchor="middle">Typed simulation IR</text>
+        <path d="M596 736H632" stroke="#8a82ee" stroke-width="2" marker-end="url(#arrow)"/>
+        <rect x="644" y="721" width="182" height="30" rx="15" fill="#2a3656"/><text x="735" y="741" text-anchor="middle">Symbolic validator</text>
+        <path d="M838 736H874" stroke="#8a82ee" stroke-width="2" marker-end="url(#arrow)"/>
+        <rect x="886" y="721" width="188" height="30" rx="15" fill="url(#violet)"/><text x="980" y="741" text-anchor="middle">Real local LAMMPS</text>
+        <path d="M1086 736H1122" stroke="#8a82ee" stroke-width="2" marker-end="url(#arrow)"/>
+        <rect x="1134" y="721" width="172" height="30" rx="15" fill="#2a3656"/><text x="1220" y="741" text-anchor="middle">Scientific quality gate</text>
+        <path d="M1318 736H1354" stroke="#8a82ee" stroke-width="2" marker-end="url(#arrow)"/>
+        <rect x="1366" y="721" width="130" height="30" rx="15" fill="#215866"/><text x="1431" y="741" text-anchor="middle">Artifacts</text>
+      </g>
+    </g>
+  </g>
+</svg>

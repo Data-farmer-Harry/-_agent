@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="790" viewBox="0 0 1600 790" role="img" aria-labelledby="title desc">
+  <title id="title">MatterLab adaptive agent routing</title>
+  <desc id="desc">A supervisor combines deterministic evidence, DAG checks and guarded model recommendations to choose direct answer, retrieval, tools or scientific compute.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111a31"/>
+      <stop offset="1" stop-color="#1c2847"/>
+    </linearGradient>
+    <linearGradient id="purple" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8e82ff"/>
+      <stop offset="1" stop-color="#5f54d6"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#55d7d6"/>
+      <stop offset="1" stop-color="#2b9cad"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f4bc72"/>
+      <stop offset="1" stop-color="#d58042"/>
+    </linearGradient>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#c7d2ee" opacity="0.08"/>
+    </pattern>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#070c1b" flood-opacity="0.36"/>
+    </filter>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#8d83f4"/>
+    </marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#51ced0"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="790" rx="28" fill="url(#bg)"/>
+  <rect width="1600" height="790" rx="28" fill="url(#dots)"/>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="70" y="62" font-size="14" font-weight="700" letter-spacing="3.7" fill="#72d9da">ADAPTIVE SCIENTIFIC AGENT</text>
+    <text x="70" y="109" font-size="36" font-weight="760" fill="#f6f8ff">Evidence-aware routing without a mandatory heavy pipeline</text>
+    <text x="70" y="142" font-size="18" fill="#aeb9d2">Rules define the safety boundary; learned weights recommend an efficient model tier inside that boundary.</text>
+
+    <g filter="url(#shadow)">
+      <rect x="70" y="210" width="246" height="164" rx="24" fill="#202d4d" stroke="#344464"/>
+      <rect x="395" y="178" width="430" height="260" rx="28" fill="#f7f8fd"/>
+      <rect x="395" y="480" width="430" height="202" rx="26" fill="#202d4d" stroke="#344464"/>
+      <rect x="905" y="188" width="625" height="482" rx="28" fill="#202d4d" stroke="#344464"/>
+    </g>
+
+    <g>
+      <circle cx="110" cy="250" r="18" fill="#344463"/>
+      <path d="M101 249H119M110 240V258" stroke="#8d83f4" stroke-width="2.5" stroke-linecap="round"/>
+      <text x="142" y="256" font-size="18" font-weight="720" fill="#f3f6ff">Incoming request</text>
+      <text x="104" y="292" font-size="13" fill="#a9b5cf">Intent · files · history</text>
+      <text x="104" y="316" font-size="13" fill="#a9b5cf">materials · risk · context</text>
+      <rect x="104" y="336" width="170" height="26" rx="13" fill="#2d3a5b"/>
+      <text x="189" y="354" text-anchor="middle" font-size="11" font-weight="650" fill="#d3d9ea">current task evidence</text>
+    </g>
+
+    <path d="M318 292H382" stroke="#8d83f4" stroke-width="3" marker-end="url(#arrowPurple)"/>
+
+    <g>
+      <rect x="421" y="202" width="132" height="28" rx="14" fill="#ebe8ff"/>
+      <text x="487" y="221" text-anchor="middle" font-size="11" font-weight="750" letter-spacing="1.2" fill="#5e54c9">SUPERVISOR</text>
+      <text x="421" y="269" font-size="24" font-weight="760" fill="#1b2641">Evidence confidence</text>
+      <text x="421" y="298" font-size="14" fill="#68758f">Programmatic signals, candidate separation</text>
+      <text x="421" y="320" font-size="14" fill="#68758f">and critical-check pass rate.</text>
+      <rect x="421" y="350" width="180" height="10" rx="5" fill="#e3e7f1"/>
+      <rect x="421" y="350" width="138" height="10" rx="5" fill="url(#purple)"/>
+      <rect x="620" y="340" width="169" height="31" rx="15" fill="#e8f7f4"/>
+      <circle cx="641" cy="355" r="8" fill="#3aaf83"/>
+      <path d="M637 355L640 358L646 351" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="655" y="360" font-size="12" font-weight="680" fill="#28785e">DAG contract passed</text>
+      <g font-size="12" font-weight="650">
+        <rect x="421" y="389" width="118" height="27" rx="13.5" fill="#f0eefc"/><text x="480" y="408" text-anchor="middle" fill="#5e54c9">route evidence</text>
+        <rect x="548" y="389" width="120" height="27" rx="13.5" fill="#edf3fa"/><text x="608" y="408" text-anchor="middle" fill="#51617e">critical checks</text>
+        <rect x="677" y="389" width="112" height="27" rx="13.5" fill="#edf3fa"/><text x="733" y="408" text-anchor="middle" fill="#51617e">risk penalty</text>
+      </g>
+    </g>
+
+    <g>
+      <text x="421" y="522" font-size="13" font-weight="720" letter-spacing="1.6" fill="#72d9da">WEIGHTED MODEL RECOMMENDATION</text>
+      <text x="421" y="550" font-size="15" fill="#f2f5ff">Small MLP suggests a model tier</text>
+      <text x="421" y="574" font-size="13" fill="#aab5cf">It does not decide answer correctness.</text>
+      <g font-size="11" fill="#bfc8dc">
+        <text x="421" y="612">fast</text><rect x="474" y="603" width="150" height="9" rx="4.5" fill="#34425f"/><rect x="474" y="603" width="115" height="9" rx="4.5" fill="#55d7d6"/>
+        <text x="421" y="636">balanced</text><rect x="474" y="627" width="150" height="9" rx="4.5" fill="#34425f"/><rect x="474" y="627" width="72" height="9" rx="4.5" fill="#8d83f4"/>
+        <text x="649" y="612">strong</text><rect x="702" y="603" width="80" height="9" rx="4.5" fill="#34425f"/><rect x="702" y="603" width="29" height="9" rx="4.5" fill="#f1b56f"/>
+        <text x="649" y="636">vision</text><rect x="702" y="627" width="80" height="9" rx="4.5" fill="#34425f"/><rect x="702" y="627" width="15" height="9" rx="4.5" fill="#c59cf4"/>
+      </g>
+      <rect x="421" y="654" width="361" height="18" rx="9" fill="#2b3858"/>
+      <text x="601" y="667" text-anchor="middle" font-size="10" font-weight="700" letter-spacing="1" fill="#d8deef">RULE BASELINE + CAPABILITY FLOOR REMAIN AUTHORITATIVE</text>
+    </g>
+
+    <path d="M610 478V449" stroke="#51ced0" stroke-width="2.5" marker-end="url(#arrowTeal)"/>
+    <text x="624" y="467" font-size="11" fill="#72d9da">guarded suggestion</text>
+
+    <path d="M827 310H889" stroke="#8d83f4" stroke-width="3" marker-end="url(#arrowPurple)"/>
+
+    <g>
+      <text x="941" y="229" font-size="13" font-weight="720" letter-spacing="1.7" fill="#9c94fb">ROUTE ONLY WHAT THE TASK NEEDS</text>
+
+      <g>
+        <rect x="941" y="258" width="255" height="118" rx="20" fill="#293657" stroke="#3a496b"/>
+        <circle cx="976" cy="294" r="17" fill="#3b4868"/>
+        <path d="M968 295L974 301L985 287" fill="none" stroke="#6fd3c8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="1006" y="299" font-size="17" font-weight="720" fill="#f5f7ff">Direct answer</text>
+        <text x="967" y="330" font-size="13" fill="#aeb8d0">Simple or contextual follow-up</text>
+        <rect x="967" y="344" width="102" height="21" rx="10.5" fill="#213f4c"/><text x="1018" y="359" text-anchor="middle" font-size="10" font-weight="700" fill="#72d9da">LOW LATENCY</text>
+      </g>
+
+      <g>
+        <rect x="1220" y="258" width="274" height="118" rx="20" fill="#293657" stroke="#3a496b"/>
+        <circle cx="1255" cy="294" r="17" fill="#3b4868"/>
+        <circle cx="1253" cy="292" r="7" fill="none" stroke="#9d94fb" stroke-width="2"/><path d="M1258 298L1264 304" stroke="#9d94fb" stroke-width="2" stroke-linecap="round"/>
+        <text x="1285" y="299" font-size="17" font-weight="720" fill="#f5f7ff">Evidence RAG</text>
+        <text x="1246" y="330" font-size="13" fill="#aeb8d0">Rewrite · hybrid retrieval · rerank</text>
+        <rect x="1246" y="344" width="118" height="21" rx="10.5" fill="#35325d"/><text x="1305" y="359" text-anchor="middle" font-size="10" font-weight="700" fill="#b7b0ff">WHEN EVIDENCE MATTERS</text>
+      </g>
+
+      <g>
+        <rect x="941" y="397" width="255" height="118" rx="20" fill="#293657" stroke="#3a496b"/>
+        <circle cx="976" cy="433" r="17" fill="#3b4868"/>
+        <path d="M969 428H983V441H969Z" fill="none" stroke="#f0b673" stroke-width="2"/><path d="M972 424V431M980 424V431" stroke="#f0b673" stroke-width="2" stroke-linecap="round"/>
+        <text x="1006" y="438" font-size="17" font-weight="720" fill="#f5f7ff">Tool / MCP</text>
+        <text x="967" y="469" font-size="13" fill="#aeb8d0">Explicit capability and schema match</text>
+        <rect x="967" y="483" width="110" height="21" rx="10.5" fill="#4a382f"/><text x="1022" y="498" text-anchor="middle" font-size="10" font-weight="700" fill="#f0bc80">FUNCTION CALLING</text>
+      </g>
+
+      <g>
+        <rect x="1220" y="397" width="274" height="118" rx="20" fill="url(#purple)"/>
+        <circle cx="1255" cy="433" r="17" fill="#ffffff" opacity="0.16"/>
+        <circle cx="1255" cy="433" r="7" fill="none" stroke="#fff" stroke-width="2"/><path d="M1255 420V425M1255 441V446M1242 433H1247M1263 433H1268" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+        <text x="1285" y="438" font-size="17" font-weight="740" fill="#fff">Scientific compute</text>
+        <text x="1246" y="469" font-size="13" fill="#eeecff">LAMMPS · CALPHAD · recognition</text>
+        <rect x="1246" y="483" width="105" height="21" rx="10.5" fill="#4239a8"/><text x="1298" y="498" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">REAL EXECUTION</text>
+      </g>
+
+      <g>
+        <path d="M1069 526V559H1212" fill="none" stroke="#52617e" stroke-width="2"/>
+        <path d="M1357 526V559H1212" fill="none" stroke="#52617e" stroke-width="2"/>
+        <rect x="1011" y="559" width="404" height="82" rx="20" fill="#17233f" stroke="#384967"/>
+        <text x="1040" y="590" font-size="15" font-weight="700" fill="#f2f5ff">Answer + artifacts + execution trace</text>
+        <text x="1040" y="615" font-size="12" fill="#aab5ce">Route · Tool · RAG · Memory · Model · DAG · provenance</text>
+        <rect x="1322" y="580" width="65" height="27" rx="13.5" fill="#214952"/>
+        <text x="1354" y="598" text-anchor="middle" font-size="10" font-weight="750" fill="#71d8d8">AUDIT</text>
+      </g>
+    </g>
+
+    <g>
+      <rect x="70" y="716" width="1460" height="39" rx="19.5" fill="#0e172d" stroke="#2d3a58"/>
+      <text x="96" y="741" font-size="12" font-weight="650" fill="#bac4d9">Principle</text>
+      <text x="164" y="741" font-size="12" fill="#8997b5">Simple requests stay simple. Evidence, tools and scientific runtimes are activated only by task requirements.</text>
+      <circle cx="1457" cy="735" r="6" fill="#52cfd0"/><text x="1473" y="741" font-size="11" font-weight="700" fill="#aeb9d2">observable by design</text>
+    </g>
+  </g>
+</svg>

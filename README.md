@@ -25,49 +25,27 @@
 
 **研材体 MatterLab** 是一个面向材料计算工作流的自适应科学 Agent。系统把自然语言需求转换为可审计的 LAMMPS/CALPHAD 任务，并统一编排动态模型路由、按需 RAG、Function Calling、MCP、共享记忆、DAG 恢复、科学质量门和端到端评测。
 
-它不是“LLM 套壳调用脚本”：LLM 负责语义理解与候选决策，确定性代码负责路由校准、权限边界、科学约束、真实执行和结果验收。
+项目希望解决的不是“让模型生成一段看起来合理的脚本”，而是如何把材料研究任务变成一条可执行、可恢复、可验证、可追溯的工程链路。LLM 负责语义理解、候选规划和自然语言合成；确定性代码负责路由校准、权限边界、科学约束、真实执行和结果验收。
 
-| **520** | **99.60%** | **99.73%** | **real_required** |
+系统同时服务两类场景：一类是 LAMMPS、CALPHAD、相图识别等计算任务，另一类是材料知识检索、模拟诊断、项目文件分析和外部工具协作。不同请求不会机械地经过同一条重链路，而是由 Supervisor 根据任务证据、复杂度与风险按需组合模型、RAG、工具、记忆和运行时。
+
+| **520 cases** | **4 个模型层级** | **real_required** | **可回归评测** |
 | :---: | :---: | :---: | :---: |
-| 综合 Benchmark cases | RAG Hit@5<br/>247 条冻结合成盲测 | MLP Accuracy<br/>735 条合成测试样本 | 普通 LAMMPS<br/>默认真实执行 |
+| 覆盖 Agent 全链路 | 加权推荐<br/>fast / balanced / strong / vision | 普通 LAMMPS<br/>默认真实执行 | development / frozen<br/>分离管理 |
 
-| 面试官快速索引 | 当前实现 |
-| --- | --- |
-| 科学计算 | 真实本地 LAMMPS、CALPHAD/pycalphad、轨迹与 GIF/MP4 后处理 |
-| Agent 决策 | Supervisor 证据评分、DAG 安全审计、低置信度 LLM 复核 |
-| 动态路由 | Rule baseline + 单隐藏层 MLP，<code>fast / balanced / strong / vision</code> 四级模型路由 |
-| 知识增强 | Query Rewrite + BM25 + 4096-d Dense + Reranker + GraphRAG + 不确定性门控 |
-| 工具生态 | 薄 Tool Router、Function Calling、内置工具、MCP Server 与外部 MCP Adapter |
-| 长任务可靠性 | DAG 并发、9 状态生命周期、checkpoint、replan、三级降级 |
-| 评测工程 | 520-case 综合 Benchmark、轨迹评测、LLM-as-Judge、Bootstrap 95% CI、效果量 |
+## 运行效果
+
+<p align="center">
+  <img src="docs/assets/screenshots/workbench-lammps-result.jpg" alt="MatterLab 真实 LAMMPS 结果工作台" width="100%" />
+</p>
+<p align="center"><sub>真实 LAMMPS 结果工作台：计算状态、科学 provenance、轨迹动画与产物导航集中呈现。</sub></p>
 
 ## 系统架构
 
-~~~mermaid
-flowchart LR
-    UI["React Workbench<br/>Chat · Artifact · Observability"] --> API["FastAPI<br/>SSE · Async Job · Run Store"]
-    API --> SUP["Supervisor<br/>Evidence Confidence + DAG Audit"]
-
-    SUP --> CHAT["Conversation"]
-    SUP --> COMP["Compute Agent"]
-    SUP --> TOOL["Tool Router"]
-    SUP --> VISION["Recognition"]
-
-    CHAT --> RAG["On-demand RAG<br/>Rewrite · Hybrid · Rerank · Graph"]
-    CHAT --> ROUTE["Dynamic LLM Router<br/>Rule + Guarded MLP"]
-    CHAT --> MEM["Shared Memory<br/>SQLite · Dedup · Conflict"]
-
-    TOOL --> BUILTIN["Function Tools"]
-    TOOL --> MCP["MCP Server / Adapter"]
-
-    COMP --> LMP["LAMMPS Runtime<br/>IR · Validator · Real Execution"]
-    COMP --> CAL["CALPHAD Runtime<br/>TDB Registry · pycalphad"]
-    LMP --> QA["Quality Gate<br/>Red-Blue · Provenance"]
-    CAL --> QA
-
-    QA --> ART["Artifacts<br/>Trace · Log · Plot · GIF · MP4"]
-    ART --> UI
-~~~
+<p align="center">
+  <img src="docs/assets/adaptive-agent-routing.svg" alt="MatterLab 自适应 Agent 路由架构" width="100%" />
+</p>
+<p align="center"><sub>规则给出安全边界，MLP 仅提供模型层级的加权建议；RAG、Tool/MCP 与科学计算运行时均按需启用。</sub></p>
 
 一次请求不会默认经过所有高级模块。Supervisor 先判断任务的领域、难度与风险；简单问题走低延迟直答，专业查证才触发 RAG，需要外部能力才调用 Tool/MCP，计算任务才进入受约束的科学运行时。
 
@@ -87,18 +65,18 @@ confidence = 0.45 × route_evidence
 
 Supervisor 同时校验 route contract、计算前置条件、跨域冲突和 DAG 拓扑。关键检查失败时先澄清；置信度低于阈值或候选差距过小时才调用 LLM 复核，LLM 不能绕过关键安全门。
 
-### 2. 动态 LLM 路由：规则安全下限 + Guarded MLP
+### 2. 动态 LLM 路由：规则基线 + 加权推荐
 
-模型路由将请求分配到 <code>fast / balanced / strong / vision</code>。本地 MLP 从任务正文、上下文负载、多模态标记、代码/材料/审查特征中学习推荐；<code>routing_focus_text</code> 会剥离 memory、tool、RAG wrapper 噪声。
+模型路由将请求分配到 <code>fast / balanced / strong / vision</code>。本地 MLP 不负责判断回答是否正确，它只是根据任务正文、上下文负载、多模态标记和代码/材料/审查特征，对四个模型层级生成一组推荐权重；<code>routing_focus_text</code> 会剥离 memory、tool、RAG wrapper 噪声。
 
 | 机制 | 作用 |
 | --- | --- |
 | <code>shadow</code> | 只记录 MLP 推荐和概率，不改变线上决策 |
-| <code>guarded</code> | 高置信度时允许覆盖规则结果 |
+| <code>guarded</code> | 推荐稳定且不违反规则时，才允许调整默认层级 |
 | capability floor | LAMMPS、repair、judge、vision 不得降到不安全模型 |
 | telemetry | 仅保存 prompt hash、特征与决策，不保存原始问题或 API Key |
 
-当前冻结的合成路由数据包含 **3,346** 条 clean、mixed、adversarial、long-noise 和 deployment-wrapper 样本；735 条测试集 Accuracy / Macro-F1 均为 **99.73%**。该数字衡量路由分类契约，不等价于线上回答准确率。[查看完整报告](backend/models/llm_route_mlp/report.md)
+离线样例用于观察三个效果：简单任务是否倾向低成本层级、复杂任务是否升级、加入长上下文或 deployment wrapper 后推荐是否仍保持稳定。最终选择始终受规则基线和 capability floor 约束，因此评估只讨论推荐行为、能力下限与稳定性，不把它包装成独立分类任务。
 
 ### 3. 风险感知 RAG：只有需要证据时才检索
 
@@ -118,9 +96,14 @@ flowchart LR
     UQ -->|uncertain| EXPAND["Expand / Escalate / Abstain"]
 ~~~
 
-Materials RAG 与 Thermo RAG 采用多阶段召回：本地 Query Rewrite、BM25/结构化词法、远程 Embedding、20-document Rerank、轻量异构 GraphRAG。冻结的 247 条跨模型合成盲测中，Rerank 后达到 **Hit@1 95.14% / Hit@5 99.60% / MRR 0.9719**；指标边界和配置见 [RAG Production](docs/RAG_PRODUCTION.md)。
+Materials RAG 与 Thermo RAG 采用多阶段召回：本地 Query Rewrite、BM25/结构化词法、远程 Embedding、候选池 Rerank 和轻量异构 GraphRAG。冻结盲测主要用于比较改写、扩大候选池和重排前后的检索变化；当前结果表明重排改善了相关证据的前排位置，扩大候选池减少了“正确文档根本没被召回”的情况。它用于验证检索链路改动，不等价于真实用户问答质量。[查看评测设计与边界](docs/RAG_PRODUCTION.md)
 
 ### 4. 真实 LAMMPS：神经—符号编译与科学质量门
+
+<p align="center">
+  <img src="docs/assets/lammps-md-pipeline.svg" alt="LAMMPS 分子动力学计算示意图" width="100%" />
+</p>
+<p align="center"><sub>从晶体结构、势函数和系综约束，到真实分子动力学执行、物理质量门与可追溯产物。</sub></p>
 
 ~~~text
 Natural Language
@@ -158,7 +141,7 @@ Natural Language
 | Agent Platform | Tool/MCP、Skills、记忆、动态模型路由 | tool trace、memory refs、route telemetry |
 | Observability | Route、Tool、RAG、Memory、LLM、DAG、Red-Blue | 前端状态节点与可展开证据链 |
 
-## 评测体系
+## 评测体系与观察效果
 
 **MatterLabAgentBench-500+Trajectory** 包含 520 条 case、14 个能力域，其中 333 条 frozen test。新增样例覆盖 LAMMPS planning、轨迹一致性、RAG 多跳、Tool/MCP、共享记忆、恢复策略、相图 registry 和最终回答。
 
@@ -169,7 +152,16 @@ Natural Language
 | Layer 3 · Statistics | paired bootstrap 95% CI、Cohen's dz、McNemar、risk difference、版本回归 gate |
 | Trajectory Eval | timestep 单调性、帧/原子数一致性、NaN、unwrapped coordinates、OVITO 产物 |
 
-Benchmark 采用 development/frozen 分离、case-level hash、防数据泄漏扫描和 provider 显式开关。Deterministic、真实 LAMMPS 与 live API 评测分开报告，避免把 mock contract 指标包装成科学准确率。[查看 Benchmark 设计](docs/MATTERLAB_BENCHMARK_500.md)
+Benchmark 采用 development/frozen 分离、case-level hash、防数据泄漏扫描和 provider 显式开关。Deterministic、真实 LAMMPS 与 live API 评测分开报告，避免把 mock contract 结果包装成真实科学效果。[查看 Benchmark 设计](docs/MATTERLAB_BENCHMARK_500.md)
+
+| 被评估模块 | 目前重点观察的效果 |
+| --- | --- |
+| 动态路由 | 简单请求避免进入重模型，复杂计算和审查任务不低于能力下限；长上下文噪声不应改变当前任务方向 |
+| RAG | Query Rewrite 扩展中英文和材料别名，Reranker 改善证据顺序，低证据场景进入 expand/escalate/abstain |
+| Tool / MCP | 只有明确工具意图才调用；schema、权限、超时和失败结果都进入 trace |
+| LAMMPS | 普通请求保持真实执行 provenance；失败时给出诊断，质量门拦截 synthetic 或明显异常结果 |
+| DAG / Recovery | 节点依赖、并发上限、checkpoint 和降级行为可以通过故障注入重复验证 |
+| Shared Memory | 重复事实减少，矛盾信息不被静默覆盖，关键原文证据在压缩后仍可追溯 |
 
 ## 技术栈与代码结构
 
