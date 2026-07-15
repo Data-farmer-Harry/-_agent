@@ -10,12 +10,23 @@ from typing import Mapping
 from pydantic import BaseModel
 
 
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = BACKEND_ROOT.parent
+SOURCE_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_ROOT = Path(os.getenv("MATTERLAB_BACKEND_ROOT", str(SOURCE_BACKEND_ROOT))).expanduser().resolve()
+PROJECT_ROOT = Path(os.getenv("MATTERLAB_PROJECT_ROOT", str(BACKEND_ROOT.parent))).expanduser().resolve()
 CONFIGS_ROOT = BACKEND_ROOT / "configs"
-DEFAULT_JSON_FILE = CONFIGS_ROOT / "llm_config.json"
+PACKAGED_DEFAULT_JSON_FILE = CONFIGS_ROOT / "llm_config.json"
+RUNTIME_DATA_ROOT = Path(os.getenv("MATTERLAB_USER_DATA_DIR", str(BACKEND_ROOT))).expanduser().resolve()
+DEFAULT_JSON_FILE = Path(
+    os.getenv(
+        "PHASE_DIAGRAM_CONFIG_FILE",
+        str(RUNTIME_DATA_ROOT / "config" / "llm_config.json")
+        if os.getenv("MATTERLAB_USER_DATA_DIR")
+        else str(PACKAGED_DEFAULT_JSON_FILE),
+    )
+).expanduser().resolve()
+_runtime_env_file = os.getenv("PHASE_DIAGRAM_ENV_FILE", "").strip()
 DEFAULT_ENV_FILES = (
-    BACKEND_ROOT / ".env",
+    (Path(_runtime_env_file).expanduser().resolve() if _runtime_env_file else BACKEND_ROOT / ".env"),
     CONFIGS_ROOT / ".env",
 )
 CONFIG_KEY_MAP = {
@@ -280,14 +291,17 @@ def build_settings(
     json_file: Path = DEFAULT_JSON_FILE,
 ) -> Settings:
     merged_env: dict[str, str] = {}
+    if PACKAGED_DEFAULT_JSON_FILE != json_file:
+        merged_env.update(_read_json_config(PACKAGED_DEFAULT_JSON_FILE))
     merged_env.update(_read_json_config(json_file))
     for candidate in DEFAULT_ENV_FILES if env_files is None else env_files:
         merged_env.update(_read_env_file(candidate))
     # JSON stores non-secret defaults. Local .env files can override those
     # defaults and hold secrets; explicit process environment remains highest.
     merged_env.update(dict(os.environ if environ is None else environ))
+    default_tmp_dir = RUNTIME_DATA_ROOT / "outputs" if os.getenv("MATTERLAB_USER_DATA_DIR") else BACKEND_ROOT / "outputs"
     return Settings(
-        tmp_dir=BACKEND_ROOT / "outputs",
+        tmp_dir=Path(merged_env.get("PHASE_DIAGRAM_TMP_DIR", str(default_tmp_dir))).expanduser().resolve(),
         python_executable=merged_env.get("PHASE_DIAGRAM_PYTHON_EXECUTABLE", sys.executable),
         sandbox_enabled=str(merged_env.get("PHASE_DIAGRAM_SANDBOX_ENABLED", "true")).strip().lower()
         not in {"0", "false", "no", "off"},

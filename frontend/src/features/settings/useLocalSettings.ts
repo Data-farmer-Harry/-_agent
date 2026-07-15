@@ -3,7 +3,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { probeAgentBackend } from '../../services/api'
 import type { ClientSettings } from '../../types/api'
 
-const DEFAULT_AGENT_API_BASE_URL = 'http://127.0.0.1:8000'
+const IS_DESKTOP_BUILD = import.meta.env.VITE_DESKTOP_BUILD === 'true'
+const DEFAULT_AGENT_API_BASE_URL = IS_DESKTOP_BUILD
+  ? window.location.origin
+  : (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000')
 const LOCAL_SETTINGS_KEY = 'materials-agent-client-settings'
 
 const defaultSettings: ClientSettings = {
@@ -20,6 +23,9 @@ interface ApiConnectionState {
 }
 
 function readStoredSettings(): ClientSettings {
+  if (IS_DESKTOP_BUILD) {
+    return defaultSettings
+  }
   try {
     const raw = window.localStorage.getItem(LOCAL_SETTINGS_KEY)
     if (!raw) {

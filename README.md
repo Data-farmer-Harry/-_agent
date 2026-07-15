@@ -16,6 +16,7 @@
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/FastAPI-Agent_Backend-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/React-Workbench-149ECA?style=flat-square&logo=react&logoColor=white" alt="React" />
+  <img src="https://img.shields.io/badge/Desktop-macOS_DMG_%7C_Windows_EXE-4B6B9B?style=flat-square&logo=electron&logoColor=white" alt="Desktop installers" />
   <img src="https://img.shields.io/badge/LAMMPS-Real_Execution-5B5EA6?style=flat-square" alt="LAMMPS" />
   <img src="https://img.shields.io/badge/MCP-Tool_Protocol-5E6AD2?style=flat-square" alt="MCP" />
   <img src="https://img.shields.io/badge/RAG-Hybrid_%2B_Rerank-17A673?style=flat-square" alt="RAG" />
@@ -174,6 +175,7 @@ Benchmark 采用 development/frozen 分离、case-level hash、防数据泄漏�
 | Retrieval & Memory | BM25、OpenRouter Embedding、Cohere Rerank、sqlite-vec、NumPy |
 | Learning & Evaluation | Local MLP、PRM-style reward、Bootstrap、LLM-as-Judge |
 | Integration | Function Calling、MCP stdio、OpenAI-compatible API |
+| Desktop | Electron、Conda Pack、DMG、Windows NSIS EXE |
 
 ~~~text
 backend/app/
@@ -188,19 +190,42 @@ backend/app/
 
 完整目录、API、配置优先级、排错和开发约定请阅读 [技术文档](./技术文档.md)。
 
-## 快速启动
+## 启动方式
+
+### 安装版软件：普通用户
+
+安装版把 React 工作台、本地 FastAPI 服务、Python 科学计算环境、LAMMPS、FFmpeg 与 OVITO 放进同一个应用交付，不要求用户预先安装 Node.js、Python 或 Conda。API Key 不会被打进安装包，首次打开后在“设置”页面填写即可。
+
+| 系统 | 安装文件 | 启动方式 |
+| --- | --- | --- |
+| macOS | <code>MatterLab-版本-架构.dmg</code> | 打开 DMG，把 MatterLab 拖入“应用程序”，之后从“应用程序”启动。 |
+| Windows 10/11 x64 | <code>MatterLab-Setup-版本-x64.exe</code> | 双击 EXE，安装完成后从桌面或开始菜单启动。 |
+
+首次启动会把随软件携带的计算运行时展开到用户数据目录，耗时会比后续启动长；历史对话、运行产物和本地配置也保存在该目录，升级应用时不会被覆盖。未配置代码签名证书的开发构建可能触发 macOS Gatekeeper 或 Windows SmartScreen 提示，正式分发时应完成 Apple Developer ID、公证与 Windows Authenticode 签名。
+
+安装包由 [Desktop installers](.github/workflows/desktop-build.yml) 工作流在 macOS 和 Windows 原生 Runner 上分别构建。完整的本机构建与发布说明见 [桌面打包文档](desktop/README.md)。
+
+### 传统前后端：开发者
+
+桌面版没有替换原有开发入口。修改 Agent、API 或前端页面时，仍然建议分别启动 FastAPI 和 Vite，以获得热更新、终端日志与完整调试能力。
 
 ~~~bash
-# Backend
+# 第一次准备 Python 环境
 conda env create -f backend/requirements/environment.yml
 conda run -n lammps_agent python -m pip install -r backend/requirements/all.txt
 cp backend/.env.example backend/.env
+
+# 终端 1：Backend
 (cd backend && conda run -n lammps_agent uvicorn app.main:app --host 127.0.0.1 --port 8000)
 
-# Frontend
+# 第一次准备前端依赖
 (cd frontend && npm ci)
+
+# 终端 2：Frontend
 (cd frontend && npm run dev -- --host 127.0.0.1 --port 5174)
 ~~~
+
+浏览器访问 <http://127.0.0.1:5174>。前端默认连接 <code>http://127.0.0.1:8000</code>，两者的地址也可以在环境变量和设置面板中调整。
 
 API Key 只应写入 <code>backend/.env</code> 或系统 Secret Manager；<code>.env</code>、运行产物、依赖环境和外部 MCP 私有配置均被 Git 忽略。
 

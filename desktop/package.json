@@ -1,0 +1,100 @@
+{
+  "name": "matterlab-desktop",
+  "version": "0.2.0",
+  "description": "MatterLab materials research agent desktop application",
+  "main": "main.mjs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "electron .",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "pack:dir": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "cn.matterlab.agent",
+    "productName": "MatterLab 研材体",
+    "asar": true,
+    "compression": "normal",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.mjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/runtime.tar.gz",
+        "to": "runtime.tar.gz"
+      },
+      {
+        "from": "resources/lammps",
+        "to": "lammps"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "app/**/*",
+          "configs/**/*",
+          "models/**/*",
+          "skills/**/*",
+          "!**/__pycache__/**",
+          "!outputs/**",
+          "!**/.env"
+        ]
+      },
+      {
+        "from": "../frontend/dist",
+        "to": "frontend"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.education",
+      "icon": "assets/icon.png",
+      "artifactName": "MatterLab-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "MatterLab ${version}",
+      "backgroundColor": "#f4f7fb",
+      "window": {
+        "width": 600,
+        "height": 420
+      }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "MatterLab-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MatterLab 研材体",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

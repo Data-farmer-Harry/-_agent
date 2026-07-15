@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import platform
-import resource
 import shutil
 import signal
 import subprocess
@@ -13,6 +12,11 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, IO, Mapping, Sequence
+
+try:
+    import resource
+except ImportError:  # Windows does not provide POSIX rlimits.
+    resource = None  # type: ignore[assignment]
 
 
 _BASE_ENV_KEYS = {
@@ -33,6 +37,7 @@ _BASE_ENV_KEYS = {
     "TZ",
     "WINDIR",
 }
+_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -192,7 +197,7 @@ class SandboxedProcess:
         self._signal_group(signal.SIGTERM, fallback=self._process.terminate)
 
     def kill(self) -> None:
-        self._signal_group(signal.SIGKILL, fallback=self._process.kill)
+        self._signal_group(_KILL_SIGNAL, fallback=self._process.kill)
 
     def _signal_group(self, sig: int, *, fallback) -> None:  # noqa: ANN001
         if self._process.poll() is not None:
@@ -202,6 +207,20 @@ class SandboxedProcess:
                 os.killpg(os.getpgid(self._process.pid), sig)
                 return
             except (OSError, ProcessLookupError):
+                pass
+        elif os.name == "nt" and sig == _KILL_SIGNAL:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(self._process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+                if self._process.poll() is not None:
+                    return
+            except (OSError, subprocess.SubprocessError):
                 pass
         try:
             fallback()
@@ -347,7 +366,10 @@ class SandboxRunner:
                 raise ValueError(f"Sandbox write root is outside allowed roots: {path}")
 
         temporary_directory = tempfile.TemporaryDirectory(prefix="matterlab-sandbox-")
-        sandbox_home = Path(temporary_directory.name)
+        # macOS exposes /var through /private/var. Native sandbox profiles
+        # compare canonical paths, so the temporary write root must be
+        # resolved before it is inserted into the profile.
+        sandbox_home = Path(temporary_directory.name).resolve()
         environment = self._build_environment(
             executable=Path(executable),
             sandbox_home=sandbox_home,
@@ -379,14 +401,26 @@ class SandboxRunner:
             read_roots=tuple(str(path) for path in normalized_read_roots),
             write_roots=tuple(str(path) for path in normalized_write_roots),
         )
+        platform_options: dict[str, Any]
+        if os.name == "posix":
+            platform_options = {
+                "start_new_session": True,
+                "preexec_fn": self._build_preexec(active_limits) if self.enabled else None,
+            }
+        else:
+            platform_options = {
+                "creationflags": int(popen_kwargs.pop("creationflags", 0))
+                | int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                | int(getattr(subprocess, "CREATE_NO_WINDOW", 0)),
+            }
+
         try:
             process = subprocess.Popen(
                 launch_command,
                 cwd=resolved_cwd,
                 env=environment,
                 shell=False,
-                start_new_session=True,
-                preexec_fn=self._build_preexec(active_limits) if self.enabled and os.name == "posix" else None,
+                **platform_options,
                 **popen_kwargs,
             )
         except Exception:
@@ -438,7 +472,7 @@ class SandboxRunner:
 
     @staticmethod
     def _set_limit(kind: int, value: int, *, allow_zero: bool = False) -> None:
-        if value < 0 or (value == 0 and not allow_zero):
+        if resource is None or value < 0 or (value == 0 and not allow_zero):
             return
         try:
             _, hard = resource.getrlimit(kind)
@@ -454,6 +488,8 @@ class SandboxRunner:
     def _build_preexec(cls, limits: SandboxLimits):
         def apply_limits() -> None:
             os.umask(0o077)
+            if resource is None:
+                return
             cls._set_limit(resource.RLIMIT_CORE, 0, allow_zero=True)
             cls._set_limit(resource.RLIMIT_CPU, int(limits.cpu_seconds))
             cls._set_limit(resource.RLIMIT_AS, int(limits.memory_mb) * 1024 * 1024)

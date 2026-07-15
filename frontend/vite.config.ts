@@ -5,6 +5,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
 
   return {
+    base: env.VITE_DESKTOP_BUILD === 'true' ? './' : '/',
     plugins: [react(), tailwindcss()],
     server: {
       port: Number(env.VITE_DEV_PORT || 5174),

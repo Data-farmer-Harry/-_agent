@@ -1,0 +1,8 @@
+name: matterlab-desktop
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - ffmpeg
+  - conda-pack=0.8.1

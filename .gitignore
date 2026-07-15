@@ -44,6 +44,10 @@ dist/
 **/dist/
 build/
 **/build/
+desktop/release/
+desktop/resources/runtime.tar.gz
+desktop/resources/lammps/*
+!desktop/resources/lammps/.gitkeep
 coverage/
 **/coverage/
 test-results/
