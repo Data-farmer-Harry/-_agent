@@ -191,6 +191,7 @@ class InfrastructureModuleTests(unittest.TestCase):
         self.assertIn("RAG Knowledge Bases", names)
         self.assertIn("SQLite Memory", names)
         self.assertIn("Artifact Lifecycle", names)
+        self.assertIn("Sandbox Runner", names)
         self.assertIn("Observability Logs", names)
         self.assertIn("Benchmark Report", names)
         embedding_check = next(check for check in report.checks if check.name == "Embedding / Vector Retrieval")

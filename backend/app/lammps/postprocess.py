@@ -23,6 +23,7 @@ import numpy as np
 from matplotlib.animation import FuncAnimation, PillowWriter
 
 from app.core.cancellation import RunCancelledError, is_cancelled
+from app.core.sandbox import SandboxLimits, get_sandbox_runner
 from app.lammps.config import detect_ovito_backend
 from app.utils.path_utils import write_json_file
 
@@ -173,7 +174,17 @@ def _render_with_python_subprocess(dump_path: Path, output_dir: Path, run_id: st
 
     try:
         cmd = [sys.executable, str(script_path), str(dump_path), str(json_path), str(video_path)]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = get_sandbox_runner().popen(
+            cmd,
+            cwd=output_dir,
+            allow_network=False,
+            read_roots=(script_path, dump_path),
+            write_roots=(output_dir,),
+            limits=SandboxLimits(timeout_seconds=600, cpu_seconds=600, memory_mb=12_288, max_file_size_mb=2_048),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         cancelled = False
         while proc.poll() is None:
             if run_id and is_cancelled(run_id):
@@ -184,6 +195,8 @@ def _render_with_python_subprocess(dump_path: Path, output_dir: Path, run_id: st
         if cancelled:
             raise RunCancelledError("Simulation cancelled by user")
         stdout, stderr = proc.communicate()
+        if proc.timed_out:
+            raise RuntimeError("OVITO Python rendering exceeded the sandbox timeout.")
         if proc.returncode != 0:
             raise RuntimeError(stderr.strip() or stdout.strip() or "unknown OVITO python-module error")
         if not json_path.exists():
@@ -257,7 +270,17 @@ def _render_with_executable(
             str(json_path),
             str(video_path),
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = get_sandbox_runner().popen(
+            cmd,
+            cwd=output_dir,
+            allow_network=False,
+            read_roots=(script_path, dump_path),
+            write_roots=(output_dir,),
+            limits=SandboxLimits(timeout_seconds=600, cpu_seconds=600, memory_mb=12_288, max_file_size_mb=2_048),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         cancelled = False
         while proc.poll() is None:
             if run_id and is_cancelled(run_id):
@@ -268,6 +291,8 @@ def _render_with_executable(
         if cancelled:
             raise RunCancelledError("Simulation cancelled by user")
         stdout, stderr = proc.communicate()
+        if proc.timed_out:
+            raise RuntimeError("OVITO rendering exceeded the sandbox timeout.")
         if proc.returncode != 0:
             raise RuntimeError(stderr.strip() or stdout.strip() or "unknown OVITO error")
         if not json_path.exists():
@@ -552,7 +577,17 @@ def _ensure_browser_friendly_mp4(video_path: Path, run_id: str | None = None) ->
         "+faststart",
         str(temp_path),
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = get_sandbox_runner().popen(
+        cmd,
+        cwd=video_path.parent,
+        allow_network=False,
+        read_roots=(video_path,),
+        write_roots=(video_path.parent,),
+        limits=SandboxLimits(timeout_seconds=300, cpu_seconds=300, memory_mb=4_096, max_file_size_mb=2_048),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     cancelled = False
     while proc.poll() is None:
         if run_id and is_cancelled(run_id):
@@ -563,5 +598,7 @@ def _ensure_browser_friendly_mp4(video_path: Path, run_id: str | None = None) ->
     if cancelled:
         raise RunCancelledError("Simulation cancelled by user")
     proc.communicate()
+    if proc.timed_out:
+        raise RuntimeError("FFmpeg transcoding exceeded the sandbox timeout.")
     if proc.returncode == 0 and temp_path.exists():
         temp_path.replace(video_path)

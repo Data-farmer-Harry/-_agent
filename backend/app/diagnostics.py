@@ -4,12 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import sqlite3
-import subprocess
 from typing import Any
 
-from app.config import DEFAULT_ENV_FILES, DEFAULT_JSON_FILE, settings
+from app.config import DEFAULT_ENV_FILES, DEFAULT_JSON_FILE, PROJECT_ROOT, settings
 from app.core.artifacts import ArtifactService
 from app.core.observability import structured_log_path
+from app.core.sandbox import SandboxLimits, get_sandbox_runner
 from app.lammps.config import detect_ovito_backend, lammps_config_public_payload
 from app.rag.data_manager import RagDataManager
 from app.rag.sqlite_vector_store import SqliteVectorStore, get_vector_store
@@ -26,19 +26,20 @@ def _mask_secret(value: str) -> str:
 
 def _safe_command_probe(command: list[str], *, timeout: float = 3.0) -> dict[str, Any]:
     try:
-        completed = subprocess.run(
+        completed = get_sandbox_runner().run(
             command,
-            capture_output=True,
+            cwd=PROJECT_ROOT,
+            allow_network=False,
+            write_roots=(),
+            limits=SandboxLimits(timeout_seconds=timeout, cpu_seconds=max(1, int(timeout)), memory_mb=1_024),
             text=True,
-            timeout=timeout,
-            check=False,
         )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "output": ""}
 
     output = "\n".join(
         line.strip()
-        for line in (completed.stdout.splitlines() + completed.stderr.splitlines())
+        for line in (str(completed.stdout or "").splitlines() + str(completed.stderr or "").splitlines())
         if line.strip()
     )
     return {
@@ -332,6 +333,22 @@ def _observability_check() -> DiagnosticCheck:
     )
 
 
+def _sandbox_check() -> DiagnosticCheck:
+    details = get_sandbox_runner().describe()
+    enabled = bool(details.get("enabled"))
+    mode = str(details.get("mode") or "disabled")
+    return DiagnosticCheck(
+        name="Sandbox Runner",
+        status="ok" if enabled else "warning",
+        summary=(
+            f"统一子进程沙箱已启用，当前模式为 {mode}。"
+            if enabled
+            else "统一子进程沙箱已关闭，仅建议在受控调试环境短暂使用。"
+        ),
+        details=details,
+    )
+
+
 def _benchmark_check() -> DiagnosticCheck:
     latest = settings.tmp_dir / "benchmarks" / "latest.json"
     available = latest.exists()
@@ -360,6 +377,7 @@ def build_system_diagnostics() -> SystemDiagnosticsResponse:
         _storage_check(),
         _sqlite_memory_check(),
         _artifact_lifecycle_check(),
+        _sandbox_check(),
         _observability_check(),
         _benchmark_check(),
     ]

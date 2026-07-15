@@ -8,6 +8,9 @@ import select
 import subprocess
 from typing import Any
 
+from app.config import PROJECT_ROOT
+from app.core.sandbox import SandboxLimits, SandboxedProcess, get_sandbox_runner
+
 
 JSONDict = dict[str, Any]
 
@@ -68,7 +71,7 @@ class ExternalMcpClient:
     def _process(self) -> "_ManagedMcpProcess":
         return _ManagedMcpProcess(self.config)
 
-    def _initialize(self, process: subprocess.Popen[bytes]) -> None:
+    def _initialize(self, process: SandboxedProcess) -> None:
         response = self._request(
             process,
             "initialize",
@@ -82,7 +85,7 @@ class ExternalMcpClient:
             raise ExternalMcpProtocolError("MCP initialize response was not an object.")
         self._notify(process, "notifications/initialized", {})
 
-    def _request(self, process: subprocess.Popen[bytes], method: str, params: JSONDict) -> JSONDict:
+    def _request(self, process: SandboxedProcess, method: str, params: JSONDict) -> JSONDict:
         request_id = self._next_id
         self._next_id += 1
         self._send(
@@ -103,10 +106,10 @@ class ExternalMcpClient:
             result = message.get("result")
             return result if isinstance(result, dict) else {}
 
-    def _notify(self, process: subprocess.Popen[bytes], method: str, params: JSONDict) -> None:
+    def _notify(self, process: SandboxedProcess, method: str, params: JSONDict) -> None:
         self._send(process, {"jsonrpc": "2.0", "method": method, "params": params})
 
-    def _send(self, process: subprocess.Popen[bytes], payload: JSONDict) -> None:
+    def _send(self, process: SandboxedProcess, payload: JSONDict) -> None:
         if process.stdin is None:
             raise ExternalMcpProtocolError("MCP process stdin is unavailable.")
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -116,7 +119,7 @@ class ExternalMcpClient:
             process.stdin.write(raw + b"\n")
         process.stdin.flush()
 
-    def _read(self, process: subprocess.Popen[bytes]) -> JSONDict:
+    def _read(self, process: SandboxedProcess) -> JSONDict:
         if process.stdout is None:
             raise ExternalMcpProtocolError("MCP process stdout is unavailable.")
         if self.config.message_framing == "content_length":
@@ -126,7 +129,7 @@ class ExternalMcpClient:
             raise ExternalMcpProtocolError("MCP process produced an empty response.")
         return json.loads(line.decode("utf-8"))
 
-    def _readline(self, process: subprocess.Popen[bytes]) -> bytes:
+    def _readline(self, process: SandboxedProcess) -> bytes:
         assert process.stdout is not None
         ready, _, _ = select.select([process.stdout], [], [], self.config.timeout_seconds)
         if not ready:
@@ -138,7 +141,7 @@ class ExternalMcpClient:
             raise ExternalMcpProtocolError(f"MCP server {self.config.name!r} closed stdout. stderr={stderr}")
         return line
 
-    def _read_exact(self, process: subprocess.Popen[bytes], length: int) -> bytes:
+    def _read_exact(self, process: SandboxedProcess, length: int) -> bytes:
         assert process.stdout is not None
         chunks: list[bytes] = []
         remaining = length
@@ -153,7 +156,7 @@ class ExternalMcpClient:
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def _read_content_length_message(self, process: subprocess.Popen[bytes]) -> JSONDict:
+    def _read_content_length_message(self, process: SandboxedProcess) -> JSONDict:
         content_length: int | None = None
         while True:
             line = self._readline(process)
@@ -172,18 +175,29 @@ class ExternalMcpClient:
 class _ManagedMcpProcess:
     def __init__(self, config: ExternalMcpServerConfig) -> None:
         self.config = config
-        self.process: subprocess.Popen[bytes] | None = None
+        self.process: SandboxedProcess | None = None
 
-    def __enter__(self) -> subprocess.Popen[bytes]:
-        env = {**os.environ, **self.config.env}
-        cwd = self.config.cwd or None
-        self.process = subprocess.Popen(
+    def __enter__(self) -> SandboxedProcess:
+        cwd = Path(self.config.cwd).expanduser().resolve() if self.config.cwd else PROJECT_ROOT
+        read_roots = [Path(argument).expanduser() for argument in self.config.args if Path(argument).expanduser().exists()]
+        self.process = get_sandbox_runner().popen(
             [self.config.command, *self.config.args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
-            env=env,
+            env_overrides=self.config.env,
+            allow_network=self.config.risk == "network",
+            read_roots=read_roots,
+            write_roots=() if self.config.read_only else (cwd,),
+            limits=SandboxLimits(
+                timeout_seconds=max(15.0, self.config.timeout_seconds * 3),
+                cpu_seconds=max(15, int(self.config.timeout_seconds * 3)),
+                memory_mb=2_048,
+                max_processes=64,
+                max_open_files=256,
+                max_file_size_mb=128,
+            ),
         )
         return self.process
 
@@ -198,7 +212,7 @@ class _ManagedMcpProcess:
                 self.process.kill()
 
 
-def _safe_stderr(process: subprocess.Popen[bytes], *, limit: int = 2000) -> str:
+def _safe_stderr(process: SandboxedProcess, *, limit: int = 2000) -> str:
     if process.stderr is None:
         return ""
     try:

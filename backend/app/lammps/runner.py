@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.cancellation import RunCancelledError, is_cancelled
+from app.core.sandbox import SandboxLimits, get_sandbox_runner
 from app.lammps.config import LammpsConfig
 from app.lammps.quality import parse_real_thermo_to_csv, seed_thermo_rows, summarize_thermo_rows, write_thermo_csv
 from app.lammps.template import EAM_FILES
@@ -57,9 +58,18 @@ def run_lammps(
     run_log_path = output_dir / "run.log"
     thermo_path = output_dir / "thermo.csv"
     cmd: list[str] = [command, "-in", str(input_path)]
-    proc = subprocess.Popen(
+    read_roots: list[Path] = [input_path]
+    if custom_structure_path:
+        read_roots.append(Path(custom_structure_path))
+    if request.get("potential_family") == "eam":
+        read_roots.append(potential_path)
+    proc = get_sandbox_runner().popen(
         cmd,
         cwd=output_dir,
+        allow_network=False,
+        read_roots=read_roots,
+        write_roots=(output_dir,),
+        limits=SandboxLimits(timeout_seconds=900, cpu_seconds=900, memory_mb=8_192, max_file_size_mb=2_048),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -79,10 +89,13 @@ def run_lammps(
 
     if cancelled:
         raise RunCancelledError("Simulation cancelled by user")
+    if proc.timed_out:
+        raise RuntimeError("LAMMPS execution exceeded the sandbox timeout.")
     if proc.returncode != 0:
         raise RuntimeError(f"LAMMPS execution failed with exit code {proc.returncode}.")
 
     summary = parse_real_thermo_to_csv(stdout, thermo_path)
+    summary["sandbox"] = proc.sandbox.as_dict()
     return "real", "", summary
 
 

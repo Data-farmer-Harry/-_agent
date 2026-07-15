@@ -129,6 +129,7 @@ Natural Language
 | Memory Safety | 写前去重、数值/语义矛盾检测、source scope 隔离和多策略消解 |
 | Orchestration | <code>asyncio + Semaphore</code> 执行 DAG，支持 checkpoint、动态 replan 与 partial synthesis |
 | PRM Planning | 对 baseline/robust/efficient 候选 DAG 做步骤级 reward 和 Best-of-N 选择 |
+| Sandbox Runner | Python、LAMMPS、OVITO、FFmpeg 与外部 MCP 统一经过本地沙箱入口；限制环境、目录、时间和资源并回收整组进程 |
 
 ## 能力矩阵
 

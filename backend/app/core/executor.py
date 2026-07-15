@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import os
 import re
-import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from app.core.artifacts import ArtifactService
+from app.core.sandbox import SandboxLimits, SandboxRunner, get_sandbox_runner
 from app.utils.path_utils import ensure_directory, read_text_file_if_exists, remove_file_if_exists, write_text_file
 
 LAYOUT_MARKER = "phase-diagram-agent-layout"
@@ -22,6 +21,7 @@ class ExecutorResult:
     stderr: str = ""
     html_content: str | None = None
     html_path: str | None = None
+    sandbox: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -34,10 +34,16 @@ class PythonExecutor(ABC):
 
 
 class LocalPythonExecutor(PythonExecutor):
-    def __init__(self, artifact_service: ArtifactService, python_executable: str) -> None:
+    def __init__(
+        self,
+        artifact_service: ArtifactService,
+        python_executable: str,
+        sandbox_runner: SandboxRunner | None = None,
+    ) -> None:
         self.artifact_service = artifact_service
         self.python_executable = python_executable
         self.project_root = Path(__file__).resolve().parents[2]
+        self.sandbox_runner = sandbox_runner or get_sandbox_runner()
 
     def _normalize_result_html(self, html_content: str) -> str:
         if LAYOUT_MARKER in html_content or ROOT_ID in html_content:
@@ -148,25 +154,24 @@ class LocalPythonExecutor(PythonExecutor):
         remove_file_if_exists(result_path)
         write_text_file(code_path, code)
 
-        env = os.environ.copy()
-        existing_pythonpath = env.get("PYTHONPATH", "").strip()
         project_root_str = str(self.project_root)
-        env["PYTHONPATH"] = (
-            project_root_str
-            if not existing_pythonpath
-            else f"{project_root_str}{os.pathsep}{existing_pythonpath}"
-        )
+        pythonpath = project_root_str
 
-        completed = subprocess.run(
+        completed = self.sandbox_runner.run(
             [self.python_executable, str(code_path)],
             cwd=run_dir,
-            capture_output=True,
+            env_overrides={"PYTHONPATH": pythonpath},
+            allow_network=False,
+            read_roots=(self.project_root / "app", self.project_root / "configs", code_path),
+            write_roots=(run_dir,),
+            limits=SandboxLimits(timeout_seconds=180, cpu_seconds=180, memory_mb=8_192),
             text=True,
-            env=env,
         )
 
         html_content = read_text_file_if_exists(result_path)
-        stderr = completed.stderr.strip()
+        stderr = str(completed.stderr or "").strip()
+        if completed.timed_out:
+            stderr = f"{stderr}\nGenerated Python execution exceeded the sandbox timeout.".strip()
 
         if html_content is not None:
             normalized_html = self._normalize_result_html(html_content)
@@ -182,14 +187,9 @@ class LocalPythonExecutor(PythonExecutor):
 
         return ExecutorResult(
             success=success,
-            stdout=completed.stdout.strip(),
+            stdout=str(completed.stdout or "").strip(),
             stderr=stderr,
             html_content=html_content,
             html_path=str(result_path) if html_content is not None else None,
+            sandbox=completed.sandbox.as_dict() if completed.sandbox else None,
         )
-
-
-class DockerExecutor(PythonExecutor):
-    def execute(self, run_id: str, code: str, *, code_filename: str | None = None) -> ExecutorResult:
-        _ = run_id, code, code_filename
-        raise NotImplementedError("DockerExecutor is reserved for a future version.")

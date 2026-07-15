@@ -523,11 +523,17 @@ class PhaseDiagramRuntime:
                     success=result.success,
                     summary="本地 Python 已执行完成，准备进入自检。" if result.success else "本地 Python 执行失败，准备进入修复。",
                     input_data={"run_id": state["run_id"]},
-                    output_data={"stdout": result.stdout[:1200], "stderr": result.stderr[:1200], "html_path": result.html_path},
+                    output_data={
+                        "stdout": result.stdout[:1200],
+                        "stderr": result.stderr[:1200],
+                        "html_path": result.html_path,
+                        "sandbox": result.sandbox,
+                    },
                     description="Execute the generated Python wrapper locally.",
                     stage=f"execute_after_codegen_{codegen_attempt}",
                     retryable=True,
                     artifacts=html_artifacts,
+                    metadata={"sandbox": result.sandbox or {}},
                     state_delta={"html_ready": bool(result.html_content), "stderr_present": bool(result.stderr.strip())},
                 )
 

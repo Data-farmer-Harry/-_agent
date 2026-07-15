@@ -20,6 +20,8 @@ DEFAULT_ENV_FILES = (
 )
 CONFIG_KEY_MAP = {
     "python_executable": "PHASE_DIAGRAM_PYTHON_EXECUTABLE",
+    "sandbox_enabled": "PHASE_DIAGRAM_SANDBOX_ENABLED",
+    "sandbox_native_enabled": "PHASE_DIAGRAM_SANDBOX_NATIVE_ENABLED",
     "llm_enabled": "PHASE_DIAGRAM_LLM_ENABLED",
     "require_llm_for_agents": "PHASE_DIAGRAM_REQUIRE_LLM_FOR_AGENTS",
     "llm_api_base_url": "PHASE_DIAGRAM_LLM_API_BASE_URL",
@@ -206,6 +208,8 @@ class Settings(BaseModel):
     observability_dir_name: str = "logs"
     observability_events_file_name: str = "events.jsonl"
     python_executable: str = sys.executable
+    sandbox_enabled: bool = True
+    sandbox_native_enabled: bool = True
     llm_enabled: bool = True
     require_llm_for_agents: bool = True
     llm_api_base_url: str = ""
@@ -285,6 +289,10 @@ def build_settings(
     return Settings(
         tmp_dir=BACKEND_ROOT / "outputs",
         python_executable=merged_env.get("PHASE_DIAGRAM_PYTHON_EXECUTABLE", sys.executable),
+        sandbox_enabled=str(merged_env.get("PHASE_DIAGRAM_SANDBOX_ENABLED", "true")).strip().lower()
+        not in {"0", "false", "no", "off"},
+        sandbox_native_enabled=str(merged_env.get("PHASE_DIAGRAM_SANDBOX_NATIVE_ENABLED", "true")).strip().lower()
+        not in {"0", "false", "no", "off"},
         llm_enabled=str(merged_env.get("PHASE_DIAGRAM_LLM_ENABLED", "true")).strip().lower() not in {"0", "false", "no", "off"},
         require_llm_for_agents=(
             str(merged_env.get("PHASE_DIAGRAM_REQUIRE_LLM_FOR_AGENTS", "true")).strip().lower()
