@@ -120,17 +120,126 @@ Natural Language
 
 普通 LAMMPS 请求默认 <code>real_required</code>：执行环境异常时返回诊断，禁止用 synthetic 结果冒充科学计算。类型化 IR 锁定材料、势函数、系综、温压、时间步长和输出契约；质量门检查 lost atoms、温度/能量异常、步数覆盖和 real/mock provenance；Red Agent 发现问题后，Blue Agent 只能执行白名单结构化 patch，并在修复后重新验证。
 
-### 5. Tool、MCP、记忆与长任务编排
+### 5. Red–Blue 对抗审查：把“自我纠错”变成受控协议
 
-| 模块 | 工程设计 |
+Red–Blue 不是让两个 LLM 无限互相讨论。Red 负责提出带证据的攻击，Blue 只能生成结构化修复提案，是否允许修改、是否继续重试以及何时终止都由确定性代码决定。它被放在 LAMMPS preflight DAG、真实执行后的质量门和九状态生命周期中，而不是作为回答末尾的一次语言润色。
+
+~~~mermaid
+flowchart TD
+    P1["约束提取"] --> MERGE["Preflight Merge"]
+    P2["Materials RAG"] --> MERGE
+    P3["Registry Lookup"] --> MERGE
+    P4["附件检查"] --> MERGE
+    P5["运行环境诊断"] --> MERGE
+    MERGE --> RED0["Red：执行前攻击"]
+    RED0 -->|pass| RUN["IR 编译 + 真实 LAMMPS"]
+    RED0 -->|blocking| STOP0["补参 / 修环境 / 终止"]
+    RUN --> QG["物理质量门"]
+    QG --> RED1["Red：执行后证据审查"]
+    RED1 -->|pass| PUBLISH["发布结果与审计产物"]
+    RED1 -->|repairable| BLUE["Blue：ADD / DELETE / MODIFY / VERIFY"]
+    BLUE --> PARSE["JSON 恢复 + Patch Policy"]
+    PARSE --> CONV{"预算、增益与震荡检查"}
+    CONV -->|accepted| RETRY["重新校验、生成、执行"]
+    RETRY --> RED1
+    CONV -->|rejected| STOP1["澄清或安全终止"]
+~~~
+
+Red 的执行后报告不是一个裸分数，而是由 <code>Finding + EvidenceRef + ReviewScore</code> 组成的审计对象。确定性 Red 是硬门，LLM Red 只能补充 advisory，不能把规则判定的失败改成成功。
+
+| 攻击维度 | Red 实际核查内容 |
 | --- | --- |
-| Tool Router | 只有触发明确能力需求时才 Function Calling；统一 schema、风险等级、超时和审计 |
-| MCP | 项目可作为 stdio MCP Server 暴露 LAMMPS/相图能力，也可接入可信外部 MCP 工具 |
-| Shared Memory | SQLite 持久化；L1 粗召回 → L2 MMR/TextRank → L3 原文证据保留 |
-| Memory Safety | 写前去重、数值/语义矛盾检测、source scope 隔离和多策略消解 |
-| Orchestration | <code>asyncio + Semaphore</code> 执行 DAG，支持 checkpoint、动态 replan 与 partial synthesis |
-| PRM Planning | 对 baseline/robust/efficient 候选 DAG 做步骤级 reward 和 Best-of-N 选择 |
-| Sandbox Runner | Python、LAMMPS、OVITO、FFmpeg 与外部 MCP 统一经过本地沙箱入口；限制环境、目录、时间和资源并回收整组进程 |
+| 参数与约束 | 材料、任务类型、目标温度、步数、timestep、系综和势函数是否与用户请求及 registry 一致 |
+| 脚本安全 | <code>thermo</code>、<code>thermo_style</code>、dump、run steps、目标温度和输出文件是否正确写入脚本 |
+| 逻辑一致性 | <code>LammpsRequest → Simulation IR → in.lammps → metrics</code> 是否出现温度、步数、时间步或文件名漂移 |
+| 物理有效性 | lost atoms、温度爆炸、能量异常、步数覆盖、fatal log、real/mock provenance 与 synthetic thermo |
+| 产物完整性 | <code>in.lammps</code>、<code>thermo.csv</code>、<code>plot.png</code>、<code>report.md</code> 及轨迹媒体是否按契约产生 |
+| 证据质量 | blocking finding 必须引用 primary evidence；RAG 是 secondary，LLM inference 只能是 advisory |
+
+Blue 使用 <code>lammps-blue-patch/v1</code>，并不直接重写脚本。补丁先作用于类型化请求，再重新经过 Pydantic schema、锁定约束、patch policy、LAMMPS validator、代码生成和下一轮 Red review。
+
+| Blue 动作 | 策略边界 |
+| --- | --- |
+| <code>ADD / MODIFY</code> | 仅允许 time_step、box_size、dump_file、potential_family、ensemble、initial_temp、notes 等白名单字段 |
+| <code>DELETE</code> | 只允许删除 initial_temp、notes 这类可恢复默认值的可选字段 |
+| <code>VERIFY</code> | 可要求重新检查 request、validation、codegen、Red review 或 physical quality，不产生越权写入 |
+| locked constraints | material、task_type、temperature、steps 和用户提供的势/结构路径禁止自动修改，涉及它们时要求用户确认 |
+
+模型返回不稳定 JSON 时采用可审计的恢复链：先做严格 schema 解析；失败后去除 Markdown fence、提取首个平衡 JSON 对象、清理尾逗号并归一化操作名；Red 仍失败时回退到确定性报告，Blue 则尝试把兼容的 request-delta 转换成受控 patch，否则拒绝。系统记录 parse mode、内容 hash、normalization 和错误，而不是用“解析成功”掩盖无效输出。
+
+修复循环有三道停止条件：repair budget 防止无限重试；Red score 的最小增益检查识别停滞；请求状态 hash 检测回到历史状态的 A→B→A 震荡。最终会产出 <code>red_review_post.json</code>、<code>repair_history.json</code> 和 LLM parse audit，前端可以逐项展开 finding、evidence、patch 与终止原因。
+
+| 实现索引 | 代码位置 |
+| --- | --- |
+| 执行前 Red DAG 节点 | [`backend/app/lammps/preflight.py`](backend/app/lammps/preflight.py) |
+| 确定性 Red、证据与评分 | [`backend/app/lammps/review/deterministic.py`](backend/app/lammps/review/deterministic.py)、[`evidence.py`](backend/app/lammps/review/evidence.py) |
+| Blue patch schema 与白名单策略 | [`backend/app/lammps/review/models.py`](backend/app/lammps/review/models.py)、[`policy.py`](backend/app/lammps/review/policy.py) |
+| JSON fallback 与循环收敛 | [`backend/app/lammps/review/json_parser.py`](backend/app/lammps/review/json_parser.py)、[`convergence.py`](backend/app/lammps/review/convergence.py) |
+| 真实执行中的 review/repair loop | [`backend/app/runtimes/lammps.py`](backend/app/runtimes/lammps.py) |
+
+### 6. DAG 并发、九状态生命周期与三级降级
+
+LAMMPS preflight 使用 <code>asyncio</code> 按拓扑依赖调度节点。无依赖的约束提取、RAG、registry、附件和环境诊断可并发执行；<code>Semaphore</code> 按资源类型分别限流，默认 network=3、cpu=2、simulation=1，避免网络调用或科学进程无限并发。任何节点仍有独立 timeout，整张图还有 global timeout。
+
+任务生命周期固定为九个合法状态：<code>queued → planning → preflight → ready → running → reviewing → repairing → completed / terminated</code>。状态机拒绝非法跳转；每次 transition、DAG event、plan version 和 termination reason 都会持久化。checkpoint 保存完成、失败、超时、跳过和待执行节点，并以 input/content/result fingerprint 判断旧结果能否安全复用，而不是仅凭节点名称复用缓存。
+
+| 降级层级 | 触发与处理 |
+| --- | --- |
+| Level 1 · local fallback | 只有非关键节点失败且声明了 fallback 时继续，例如 RAG 不可用后仅依赖用户输入与 registry；结果标记 <code>completed_with_fallback</code> 并降低信任度 |
+| Level 2 · batch replan | 合并同一批失败，失效失败节点及其下游；内容指纹一致的安全节点复用 checkpoint，其余节点生成新 plan version 重跑 |
+| Level 3 · partial report | 全局超时后取消未完成任务，保留已完成证据、artifact 和 checkpoint，生成 <code>partial_result.json</code>，明确 <code>scientific_result_available=false</code> |
+
+Replan 也有 repair/replan budget 和 failure-signature 震荡检测；缺少用户输入时转入澄清，基础设施缺失时返回诊断。PRM 规划层会为 baseline、robust、efficient 三个语义等价 DAG 计算关键节点覆盖、依赖合法性、重试安全、证据输出、延迟成本等步骤级 reward，再做 Best-of-N 选择。它目前是可验证的确定性 process reward 接口，不冒充已经训练好的在线价值模型。
+
+### 7. 长上下文压缩与跨 Agent 共享记忆
+
+聊天历史和共享记忆分开管理。历史记录保证会话连续性；共享记忆把可复用内容拆成 constraint、fact、evidence、result、preference、finding、repair，并按 run、conversation、user、global scope 隔离，避免其他会话的材料参数污染当前任务。
+
+~~~text
+Query Rewrite
+  → L1：BM25 / metadata / dense 粗召回与锁定事实强制保留
+  → L2：MMR + TextRank 风格相关性/多样性压缩，生成 bounded digest
+  → L3：保存 raw evidence、source ref、content hash 和回溯指针
+  → Working State：在 prompt budget 内注入当前 Agent
+~~~
+
+SQLite 同时保存 memory item、版本、来源、原始证据、embedding cache、冲突和消解记录；向量索引可用 SQLite vector store，真实 embedding 不可用时保留确定性 dense fallback。关键原文不会被摘要覆盖，L2 digest 必须持有 L3 evidence id。
+
+写入前先 canonicalize 单位、数值、subject/predicate 和自由文本，再做 exact/normalized 去重。冲突检测覆盖数值差异、单位不一致、否定翻转、领域反义词、上下文条件差异和并行版本；相似键只标记为 semantic candidate，不自动当作已证实冲突。用户或 locked memory 参与冲突时进入 <code>needs_user</code>；其他情况只给出 authority、recency、confidence 或 manual review 建议，不静默覆盖高权威事实。
+
+### 8. Function Tools、MCP、Skills 与统一沙箱
+
+普通 Agent 当然可以提出“需要某种能力”，但真实调用经过一层很薄的 Tool Router。只有显式文件读取、数据画像、结构转换、物理校验、报告、工作区搜索或文献检索意图才产生 function call；普通解释和计算主链不会因为关键词碰撞被工具劫持。
+
+| 层 | 作用 |
+| --- | --- |
+| Tool Registry | 统一 tool name、JSON input schema、read-only 属性、输出类型与 handler |
+| Policy Router | 决定 need_tool、arguments、confidence、auto_execute 与 confirmation；支持从本地 JSON 加载训练/RL 得到的可插拔规则 |
+| Tool Executor | 执行超时、错误收敛、artifact 归档和 trace，不把失败工具结果伪装成正常上下文 |
+| MCP Adapter | 本项目可作为 stdio MCP Server 暴露 LAMMPS、相图、registry、RAG 和 diagnostics，也能接入可信外部 stdio MCP Server |
+| Skills | 从 <code>SKILL.md</code> front matter 加载 trigger、说明和 preferred tools；每轮最多按需选择少量 Skill 并限制注入字符数 |
+
+Python、pycalphad、LAMMPS、OVITO、FFmpeg、系统探测和外部 MCP 子进程统一进入 <code>SandboxRunner</code>。它禁止 <code>shell=True</code>，校验工作目录和可执行文件，使用清洁环境且默认不向计算进程继承 LLM/RAG API Key；同时限制超时、CPU、内存、进程数、打开文件数和单文件大小，并在取消或超时时回收整个进程组。macOS 可用时叠加 <code>sandbox-exec</code>，其他宿主仍保留跨平台的目录、环境、资源和生命周期隔离。
+
+### 9. 搜索式规划、GraphRAG 与多保真科学执行
+
+项目中的学习方法都被放在可验证边界内：MLP 只能推荐模型层级，PRM 只能选择满足同一科学约束的 DAG，GraphRAG 不能覆盖 registry/执行证据，多保真 pilot 不能绕过真实质量门。
+
+| 方法 | 当前实现与安全边界 |
+| --- | --- |
+| 神经—符号 IR | LLM/heuristic 先生成 <code>LammpsRequest</code>，再转换为带单位、locked fields 和 provenance 的 <code>LammpsSimulationIR</code>；符号 validator 检查材料/势函数、系综、阻尼、温度、timestep、steps 与 dump 后确定性编译 |
+| Process Reward | 对候选 DAG 做静态步骤评分，并按真实节点 completed/fallback/failed/timed_out 生成 <code>process-reward-trace/v1</code>，接口以后可替换为学习型 value model |
+| Materials GraphRAG | 以 Document–Material–Method–Tool–Phase–Potential–Community 构建轻量异构图，从 BM25/dense/rerank seed 沿共享实体传播，并保留传播路径 |
+| 检索风险控制 | 综合 top score、top-1/top-2 margin、多通道一致性和 evidence diversity，输出 <code>answer / expand / escalate / abstain</code>，支持用冻结校准集拟合 selective threshold |
+| 多保真调度 | 可选地先运行约 5% 的短程 pilot，根据稳定性、失败概率、质量门和 Value of Information 决定 <code>continue_full / repair / stop</code>；默认关闭，避免无意增加普通请求延迟 |
+
+### 10. CALPHAD、图像识别与端到端可观测性
+
+除 LAMMPS 外，Compute Agent 还包含 CALPHAD runtime：由 Thermo Registry 与 Thermo RAG 选择本地 TDB，生成薄执行 wrapper，在沙箱内调用 pycalphad 完成二元/三元相图计算，并输出 HTML、图表、summary、trace 和数据库 provenance。未命中 registry 时不会伪装成已完成计算。
+
+Recognition Agent 面向上传的相图截图，提取坐标轴、标签、相区和关键点并构造 structured scene；识别结果既可以直接解释，也可以作为“识别后计算”的上游输入。当前定位是结构化重构与交互展示，不能替代人工校核原始实验数据。
+
+后端把 route、Supervisor 置信度、RAG gate/rewrite/hits/uncertainty、Tool/Skill/MCP 决策、LLM tier/MLP shadow、shared-memory 写入与冲突、DAG/lifecycle、Red–Blue finding/patch、sandbox profile 和 artifact provenance 汇总为 <code>agent_observability.v1</code>。异步 job 通过 SSE 发送 lifecycle 与 DAG 状态；前端优先展示科学结果、GIF/MP4 和下载产物，再按需展开内部证据链。
 
 ## 能力矩阵
 
@@ -140,6 +249,8 @@ Natural Language
 | CALPHAD Agent | TDB 自动选择、二元/三元相图、相区计算 | HTML、相图、trace、数据库 provenance |
 | Materials RAG | 材料知识、LAMMPS 文档、多跳证据、引用 | ranked evidence、source refs、uncertainty |
 | Recognition | 相图截图结构化识别与交互重构 | labels、axes、structured scene |
+| Red–Blue Review | 执行前/后证据攻击、受控 patch、收敛与震荡检测 | Red report、Blue patch、repair history、parse audit |
+| DAG & Safety | 并发限流、九状态生命周期、checkpoint/replan、统一沙箱 | lifecycle、DAG events、partial report、sandbox profile |
 | Agent Platform | Tool/MCP、Skills、记忆、动态模型路由 | tool trace、memory refs、route telemetry |
 | Observability | Route、Tool、RAG、Memory、LLM、DAG、Red-Blue | 前端状态节点与可展开证据链 |
 
