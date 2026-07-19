@@ -9,7 +9,12 @@ import numpy as np
 
 from app.core.llm_route_learning import LearnedPolicyConfig, NeuralRouteModel, extract_route_features, feature_names
 from app.core.llm_routing import LLMRoute, LLMRouter, LLMRoutingConfig
-from benchmarks.train_llm_route_mlp import build_synthetic_route_dataset, load_telemetry_route_dataset, train_route_mlp
+from benchmarks.train_llm_route_mlp import (
+    build_simulated_production_telemetry,
+    build_synthetic_route_dataset,
+    load_telemetry_route_dataset,
+    train_route_mlp,
+)
 
 
 class LearnedLLMRouteTests(unittest.TestCase):
@@ -97,6 +102,42 @@ class LearnedLLMRouteTests(unittest.TestCase):
         self.assertIn("confusion_matrix", metrics["test"])
         self.assertIn("probe", metrics)
         self.assertIn("dataset_distribution", metrics["metadata"])
+        self.assertIn("calibration", metrics)
+        self.assertGreater(model.calibration_temperature, 0.0)
+        self.assertGreater(model.ood_threshold, 0.0)
+        self.assertIn("expected_calibration_error", metrics["test"])
+
+    def test_simulated_production_rows_are_explicitly_marked_and_privacy_safe(self) -> None:
+        rows = build_simulated_production_telemetry(samples=120, seed=19)
+
+        self.assertEqual(len(rows), 120)
+        self.assertTrue(all(row["source"] == "simulated_production_telemetry" for row in rows))
+        self.assertTrue(all(row["simulation"]["not_real_user_traffic"] is True for row in rows))
+        self.assertTrue(all("feature_values" in row for row in rows))
+        self.assertTrue(all("system_prompt" not in row and "user_prompt" not in row for row in rows))
+        self.assertGreaterEqual(len({str(row["label"]) for row in rows}), 3)
+
+    def test_calibrated_recommendation_exposes_margin_entropy_and_ood(self) -> None:
+        rows = [
+            *build_synthetic_route_dataset(samples_per_class=12, seed=23),
+            *build_simulated_production_telemetry(samples=180, seed=24),
+        ]
+        model, _metrics, _splits = train_route_mlp(rows, hidden_dim=12, epochs=45, seed=23)
+        features = extract_route_features(
+            system_prompt="Repair and review a LAMMPS request.",
+            user_prompt="LAMMPS Cu EAM NVT failed; verify locked constraints.",
+            max_tokens=1100,
+            temperature=0.1,
+            capability="lammps.review",
+        )
+
+        recommendation = model.recommend(features)
+
+        self.assertGreaterEqual(recommendation.probability_margin, 0.0)
+        self.assertLessEqual(recommendation.probability_margin, 1.0)
+        self.assertGreaterEqual(recommendation.normalized_entropy, 0.0)
+        self.assertLessEqual(recommendation.normalized_entropy, 1.0)
+        self.assertGreaterEqual(recommendation.ood_score, 0.0)
 
     def test_telemetry_rows_train_without_prompt_text(self) -> None:
         features = extract_route_features(

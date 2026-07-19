@@ -20,6 +20,7 @@ from app.core.llm_route_learning import (  # noqa: E402
     extract_route_features,
     feature_names,
 )
+from app.core.llm_capabilities import LLMCapability, get_capability_spec  # noqa: E402
 
 
 LABEL_TO_ID = {label: index for index, label in enumerate(LEARNED_ROUTE_LABELS)}
@@ -119,6 +120,261 @@ def load_telemetry_route_dataset(
     return rows
 
 
+def build_simulated_production_telemetry(
+    samples: int = 1600,
+    seed: int = 20260719,
+) -> list[dict[str, object]]:
+    """Generate privacy-safe production-like observations for offline routing.
+
+    These rows are simulations, not real user traffic. Labels are selected from
+    simulated quality/latency/cost outcomes under the same capability floors as
+    runtime routing. Prompt text is discarded after feature extraction.
+    """
+
+    rng = np.random.default_rng(seed)
+    workloads: tuple[dict[str, object], ...] = (
+        {
+            "family": "simple_chat",
+            "weight": 0.18,
+            "capability": LLMCapability.CHAT_ANSWER.value,
+            "complexity": (0, 0, 1),
+            "system": "Answer the active user question directly and concisely.",
+            "prompts": (
+                "什么是共晶反应？请简短解释。",
+                "你好，请用一句话介绍这个材料 Agent。",
+                "解释一下 NVT 和 NPT 的区别，不运行模拟。",
+            ),
+            "max_tokens": (220, 850),
+        },
+        {
+            "family": "technical_chat",
+            "weight": 0.12,
+            "capability": LLMCapability.CHAT_ANSWER.value,
+            "complexity": (1, 1, 2),
+            "system": "Answer a technical materials question and preserve scientific uncertainty.",
+            "prompts": (
+                "比较 EAM、MEAM 和 LJ 势函数的适用边界，并说明选择依据。",
+                "解释 Al-Zn 相图中 liquidus 和 solidus 的关系。",
+                "分析升温速率、时间步和系综对分子动力学稳定性的共同影响。",
+            ),
+            "max_tokens": (700, 1700),
+        },
+        {
+            "family": "memory_summary",
+            "weight": 0.09,
+            "capability": LLMCapability.MEMORY_SUMMARY.value,
+            "complexity": (0, 0, 1),
+            "system": "Compress durable research memory without retaining transient wording.",
+            "prompts": (
+                "压缩这段会话，只保留材料体系、运行结果和未解决问题。",
+                "生成长期记忆摘要，保留用户锁定的温度和步数。",
+            ),
+            "max_tokens": (120, 320),
+        },
+        {
+            "family": "prompt_suggestion",
+            "weight": 0.06,
+            "capability": LLMCapability.PROMPT_SUGGEST.value,
+            "complexity": (0, 0, 1),
+            "system": "Suggest one useful next research prompt.",
+            "prompts": (
+                "根据上一轮结果推荐一个最值得继续追问的问题。",
+                "给出一个用于验证模拟可信度的后续提问。",
+            ),
+            "max_tokens": (120, 300),
+        },
+        {
+            "family": "supervisor",
+            "weight": 0.10,
+            "capability": LLMCapability.SUPERVISOR_ROUTE.value,
+            "complexity": (1, 1, 2),
+            "system": "Choose a route and return structured JSON.",
+            "prompts": (
+                "判断这轮应该聊天、识图、生成相图还是运行 LAMMPS。",
+                "用户说继续上一轮并修改温度，请结合历史上下文选择 route_name。",
+                "请求同时提到相图和 LAMMPS，请判断是否需要澄清。",
+            ),
+            "max_tokens": (450, 950),
+        },
+        {
+            "family": "rag_answer",
+            "weight": 0.13,
+            "capability": LLMCapability.RAG_ANSWER.value,
+            "complexity": (1, 1, 2),
+            "system": "Use retrieved evidence and answer with grounded scientific claims.",
+            "prompts": (
+                "结合检索证据解释 Fe-C 共析点并说明引用边界。",
+                "根据知识库比较 EAM 与 MEAM，并区分事实和建议。",
+                "综合多段材料文献证据分析势函数选择，不得编造引用。",
+            ),
+            "max_tokens": (650, 1800),
+        },
+        {
+            "family": "phase_compute",
+            "weight": 0.09,
+            "capability": LLMCapability.PHASE_CODEGEN.value,
+            "complexity": (2, 2, 2),
+            "system": "Generate a safe pycalphad wrapper under the local TDB contract.",
+            "prompts": (
+                "为 Al-Zn 生成受限的 pycalphad 相图 wrapper。",
+                "修复相图代码并保持数据库、相名和输出契约。",
+            ),
+            "max_tokens": (1400, 2600),
+        },
+        {
+            "family": "phase_review",
+            "weight": 0.06,
+            "capability": LLMCapability.PHASE_REVIEW.value,
+            "complexity": (2, 2, 2),
+            "system": "Review phase-diagram code and structured output conservatively.",
+            "prompts": (
+                "审查生成相图的数据库来源、相名和 HTML 输出契约。",
+                "检查相图结果是否错误声称了不存在的热力学数据。",
+            ),
+            "max_tokens": (650, 1300),
+        },
+        {
+            "family": "lammps_parse",
+            "weight": 0.06,
+            "capability": LLMCapability.LAMMPS_REQUEST_PARSE.value,
+            "complexity": (2, 2, 2),
+            "system": "Parse a LAMMPS request into conservative JSON.",
+            "prompts": (
+                "解析 Cu 从 300K 加热到 800K、4000 steps、NVT、EAM 的运行参数。",
+                "从用户请求中抽取材料、势函数、温度、步数和系综。",
+            ),
+            "max_tokens": (650, 1100),
+        },
+        {
+            "family": "lammps_repair_review",
+            "weight": 0.08,
+            "capability": LLMCapability.LAMMPS_REQUEST_REPAIR.value,
+            "complexity": (2, 2, 2),
+            "system": "Repair and verify a LAMMPS request without changing locked constraints.",
+            "prompts": (
+                "lost atoms 后安全修复 time_step，并 VERIFY 材料、温度和步数未改变。",
+                "根据 thermo 和 run.log 审查失败原因，输出 ADD/MODIFY/VERIFY patch。",
+            ),
+            "max_tokens": (800, 1700),
+        },
+        {
+            "family": "vision_recognition",
+            "weight": 0.03,
+            "capability": LLMCapability.VISION_RECOGNITION.value,
+            "complexity": (3, 3, 3),
+            "system": "Read the uploaded phase-diagram image and return structured visual facts.",
+            "prompts": (
+                "识别相图截图中的坐标轴、相区和关键点。data:image/png;base64,...",
+                "从 image_url 提取 plot region、labels 和 curves。",
+            ),
+            "max_tokens": (900, 1900),
+            "multimodal": True,
+        },
+    )
+    probabilities = np.asarray([float(item["weight"]) for item in workloads], dtype=float)
+    probabilities = probabilities / probabilities.sum()
+    rows: list[dict[str, object]] = []
+    for index in range(max(0, samples)):
+        workload = workloads[int(rng.choice(len(workloads), p=probabilities))]
+        complexity = int(rng.choice(workload["complexity"]))  # type: ignore[arg-type]
+        capability = str(workload["capability"])
+        user_prompt = str(rng.choice(workload["prompts"]))  # type: ignore[arg-type]
+        system_prompt = str(workload["system"])
+        multimodal = bool(workload.get("multimodal"))
+        token_bounds = workload["max_tokens"]
+        max_tokens = int(rng.integers(int(token_bounds[0]), int(token_bounds[1]) + 1))  # type: ignore[index]
+        temperature = float(rng.choice([0.05, 0.1, 0.2]))
+        history_chars = int(rng.choice([0, 0, 0, 800, 2400, 7200], p=[0.24, 0.20, 0.16, 0.18, 0.14, 0.08]))
+        if history_chars:
+            user_prompt = (
+                f"User message:\n{user_prompt}\n\n"
+                f"Current summary:\n{'context evidence artifact ' * max(1, history_chars // 26)}\n\n"
+                "Tool results from this turn:\n(none)\n\nConversation history:\n[]"
+            )
+        outcomes, label = _simulate_route_outcomes(
+            capability=capability,
+            complexity=complexity,
+            multimodal=multimodal,
+            max_tokens=max_tokens,
+            rng=rng,
+        )
+        features = extract_route_features(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            capability=capability,
+            multimodal=multimodal,
+        )
+        rows.append(
+            {
+                "case_id": f"simulated_telemetry.{index:06d}",
+                "label": label,
+                "feature_values": features.values,
+                "feature_schema": "llm-route-features/v1",
+                "capability": capability,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "multimodal": multimodal,
+                "difficulty": f"simulated_{workload['family']}",
+                "source": "simulated_production_telemetry",
+                "simulation": {
+                    "not_real_user_traffic": True,
+                    "workload_family": workload["family"],
+                    "complexity": complexity,
+                    "history_chars": history_chars,
+                    "candidate_outcomes": outcomes,
+                },
+            }
+        )
+    return rows
+
+
+def _simulate_route_outcomes(
+    *,
+    capability: str,
+    complexity: int,
+    multimodal: bool,
+    max_tokens: int,
+    rng: np.random.Generator,
+) -> tuple[dict[str, dict[str, object]], str]:
+    levels = {"fast": 0, "balanced": 1, "strong": 2, "vision": 3}
+    base_latency = {"fast": 480.0, "balanced": 1050.0, "strong": 2350.0, "vision": 2050.0}
+    cost_units = {"fast": 0.20, "balanced": 0.65, "strong": 1.45, "vision": 1.70}
+    capability_spec = get_capability_spec(capability)
+    floor = capability_spec.minimum_tier if capability_spec is not None else "fast"
+    candidates = ("vision",) if multimodal else ("fast", "balanced", "strong")
+    outcomes: dict[str, dict[str, object]] = {}
+    eligible: list[tuple[float, str]] = []
+    for tier in candidates:
+        level = levels[tier]
+        below_floor = tier != "vision" and level < levels.get(floor, 0)
+        shortfall = max(0, complexity - level)
+        quality = float(np.clip(0.945 - 0.145 * shortfall + 0.012 * max(0, level - complexity) + rng.normal(0, 0.035), 0.0, 1.0))
+        success_probability = float(np.clip(0.985 - 0.10 * shortfall, 0.65, 0.995))
+        success = bool(rng.random() <= success_probability)
+        latency_ms = float(base_latency[tier] * rng.lognormal(mean=0.0, sigma=0.22) * (1.0 + max_tokens / 9000.0))
+        cost = float(cost_units[tier] * (0.7 + max_tokens / 2200.0))
+        quality_threshold = 0.84 if complexity < 2 else 0.87
+        meets_quality = bool(success and quality >= quality_threshold and not below_floor)
+        utility = float(latency_ms / 5000.0 + cost * 0.55 + (1.0 - quality) * 4.0)
+        outcomes[tier] = {
+            "quality_score": round(quality, 4),
+            "latency_ms": round(latency_ms, 2),
+            "cost_units": round(cost, 4),
+            "success": success,
+            "meets_quality_floor": meets_quality,
+            "below_capability_floor": below_floor,
+            "utility": round(utility, 4),
+        }
+        if meets_quality:
+            eligible.append((utility, tier))
+    if eligible:
+        return outcomes, min(eligible)[1]
+    fallback = max(candidates, key=lambda tier: (float(outcomes[tier]["quality_score"]), levels[tier]))
+    return outcomes, fallback
+
+
 def train_route_mlp(
     rows: list[dict[str, object]],
     *,
@@ -129,18 +385,29 @@ def train_route_mlp(
     batch_size: int = 96,
     seed: int = 20260710,
     train_fraction: float = 0.78,
+    calibration_fraction: float = 0.16,
 ) -> tuple[NeuralRouteModel, dict[str, object], dict[str, list[dict[str, object]]]]:
     x_all, y_all = _rows_to_arrays(rows)
-    train_idx, test_idx = _stratified_split(y_all, train_fraction=train_fraction, seed=seed)
+    train_pool_idx, test_idx = _stratified_split(y_all, train_fraction=train_fraction, seed=seed)
+    fit_relative_idx, calibration_relative_idx = _stratified_split(
+        y_all[train_pool_idx],
+        train_fraction=1.0 - calibration_fraction,
+        seed=seed + 1,
+    )
+    train_idx = train_pool_idx[fit_relative_idx]
+    calibration_idx = train_pool_idx[calibration_relative_idx]
     x_train, y_train = x_all[train_idx], y_all[train_idx]
+    x_calibration, y_calibration = x_all[calibration_idx], y_all[calibration_idx]
     x_test, y_test = x_all[test_idx], y_all[test_idx]
     train_rows = [rows[index] for index in train_idx]
+    calibration_rows = [rows[index] for index in calibration_idx]
     test_rows = [rows[index] for index in test_idx]
 
     rng = np.random.default_rng(seed)
     feature_mean = x_train.mean(axis=0, keepdims=True)
     feature_std = np.maximum(x_train.std(axis=0, keepdims=True), 1e-8)
     x_train_norm = (x_train - feature_mean) / feature_std
+    x_calibration_norm = (x_calibration - feature_mean) / feature_std
     x_test_norm = (x_test - feature_mean) / feature_std
 
     input_dim = x_train.shape[1]
@@ -190,11 +457,15 @@ def train_route_mlp(
                 }
             )
 
+    calibration_logits = _forward_logits(x_calibration_norm, weights1, bias1, weights2, bias2)
+    calibration_temperature = _fit_temperature_scaling(y_calibration, calibration_logits)
+    ood_threshold = _fit_ood_threshold(x_train_norm)
     metadata = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "training_source": "hard_synthetic_llm_route_cases",
+        "training_source": "mixed_route_training",
         "samples_total": len(rows),
         "train_samples": int(len(train_idx)),
+        "calibration_samples": int(len(calibration_idx)),
         "test_samples": int(len(test_idx)),
         "dataset_distribution": _row_distribution(rows),
         "hidden_dim": hidden_dim,
@@ -212,10 +483,15 @@ def train_route_mlp(
         bias1=bias1.reshape(-1),
         weights2=weights2,
         bias2=bias2.reshape(-1),
+        calibration_temperature=calibration_temperature,
+        ood_threshold=ood_threshold,
         metadata=metadata,
     )
     train_probs = _predict_probs(model, x_train)
+    calibration_probs = _predict_probs(model, x_calibration)
     test_probs = _predict_probs(model, x_test)
+    raw_calibration_probs = _softmax(calibration_logits)
+    raw_test_probs = _softmax(_forward_logits(x_test_norm, weights1, bias1, weights2, bias2))
     probe_rows = build_route_probe_cases()
     x_probe, y_probe = _rows_to_arrays(probe_rows)
     probe_probs = _predict_probs(model, x_probe)
@@ -223,11 +499,27 @@ def train_route_mlp(
         "schema_version": "llm-route-mlp-metrics/v1",
         "metadata": metadata,
         "train": _classification_metrics(y_train, train_probs),
+        "calibration_split": _classification_metrics(y_calibration, calibration_probs),
         "test": _classification_metrics(y_test, test_probs),
         "probe": _classification_metrics(y_probe, probe_probs),
+        "calibration": {
+            "method": "temperature_scaling",
+            "temperature": calibration_temperature,
+            "ood_threshold": ood_threshold,
+            "calibration_samples": int(len(calibration_idx)),
+            "calibration_before": _calibration_metrics(y_calibration, raw_calibration_probs),
+            "calibration_after": _calibration_metrics(y_calibration, calibration_probs),
+            "test_before": _calibration_metrics(y_test, raw_test_probs),
+            "test_after": _calibration_metrics(y_test, test_probs),
+        },
         "loss_history": loss_history,
     }
-    return model, metrics, {"train": train_rows, "test": test_rows, "probe": probe_rows}
+    return model, metrics, {
+        "train": train_rows,
+        "calibration": calibration_rows,
+        "test": test_rows,
+        "probe": probe_rows,
+    }
 
 
 def write_experiment_outputs(
@@ -253,12 +545,21 @@ def write_experiment_outputs(
     }
     if write_splits:
         train_path = output_dir / "train.jsonl"
+        calibration_path = output_dir / "calibration.jsonl"
         test_path = output_dir / "test.jsonl"
         probe_path = output_dir / "probe.jsonl"
         _write_jsonl(train_path, splits["train"])
+        _write_jsonl(calibration_path, splits["calibration"])
         _write_jsonl(test_path, splits["test"])
         _write_jsonl(probe_path, splits["probe"])
-        outputs.update({"train": str(train_path), "test": str(test_path), "probe": str(probe_path)})
+        outputs.update(
+            {
+                "train": str(train_path),
+                "calibration": str(calibration_path),
+                "test": str(test_path),
+                "probe": str(probe_path),
+            }
+        )
     return outputs
 
 
@@ -275,15 +576,47 @@ def render_metrics_markdown(metrics: dict[str, object], *, model_path: str | Pat
         "",
         f"Training source: `{metadata.get('training_source', 'unknown')}`",
         "",
-        f"Synthetic samples: `{metadata.get('synthetic_samples', 'n/a')}` · telemetry samples: `{metadata.get('telemetry_samples', 'n/a')}`",
+        (
+            f"Synthetic samples: `{metadata.get('synthetic_samples', 'n/a')}` · "
+            f"simulated production telemetry: `{metadata.get('simulated_telemetry_samples', 'n/a')}` · "
+            f"real telemetry: `{metadata.get('telemetry_samples', 'n/a')}`"
+        ),
         "",
-        "| Split | Accuracy | Macro precision | Macro recall | Macro F1 | Weighted F1 | Top-2 accuracy | Log loss |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "> Simulated production telemetry is an offline proxy dataset and is not real user traffic.",
+        "",
+        "| Split | Accuracy | Macro precision | Macro recall | Macro F1 | Weighted F1 | Top-2 accuracy | Log loss | ECE | Brier |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         _summary_row("train", train),
+        _summary_row("calibration", metrics["calibration_split"]),  # type: ignore[index]
         _summary_row("test", test),
         _summary_row("probe", metrics["probe"]),  # type: ignore[index]
         "",
     ]
+    calibration = metrics["calibration"]  # type: ignore[index]
+    lines.extend(
+        [
+            "## Confidence calibration",
+            "",
+            f"Method: `{calibration['method']}` · fitted temperature: `{calibration['temperature']:.4f}` · "
+            f"OOD threshold: `{calibration['ood_threshold']:.4f}`",
+            "",
+            "| Evaluation | ECE before | ECE after | Brier before | Brier after |",
+            "| --- | ---: | ---: | ---: | ---: |",
+            (
+                f"| calibration split | {calibration['calibration_before']['expected_calibration_error']:.4f} | "
+                f"{calibration['calibration_after']['expected_calibration_error']:.4f} | "
+                f"{calibration['calibration_before']['brier_score']:.4f} | "
+                f"{calibration['calibration_after']['brier_score']:.4f} |"
+            ),
+            (
+                f"| frozen test | {calibration['test_before']['expected_calibration_error']:.4f} | "
+                f"{calibration['test_after']['expected_calibration_error']:.4f} | "
+                f"{calibration['test_before']['brier_score']:.4f} | "
+                f"{calibration['test_after']['brier_score']:.4f} |"
+            ),
+            "",
+        ]
+    )
     lines.extend(_classification_markdown_section("Test", test))
     lines.extend(_classification_markdown_section("Probe", metrics["probe"]))  # type: ignore[arg-type,index]
     lines.extend(
@@ -313,6 +646,12 @@ def main() -> None:
     parser.add_argument("--telemetry-path", type=Path, default=BACKEND_ROOT / "outputs" / "logs" / "events.jsonl")
     parser.add_argument("--telemetry-max-rows", type=int, default=2500)
     parser.add_argument("--include-failed-telemetry", action="store_true", help="Include failed LLM calls as noisy observed labels.")
+    parser.add_argument(
+        "--simulated-telemetry-samples",
+        type=int,
+        default=0,
+        help="Add explicitly labeled production-like simulated observations; these are never reported as real traffic.",
+    )
     parser.add_argument("--write-splits", action="store_true", help="Persist reproducible train/test/probe JSONL files for audit.")
     args = parser.parse_args()
 
@@ -326,7 +665,11 @@ def main() -> None:
         else []
     )
     synthetic_rows = [] if args.telemetry_only else build_synthetic_route_dataset(samples_per_class=args.samples_per_class, seed=args.seed)
-    rows = [*synthetic_rows, *telemetry_rows]
+    simulated_rows = build_simulated_production_telemetry(
+        samples=max(0, args.simulated_telemetry_samples),
+        seed=args.seed + 101,
+    )
+    rows = [*synthetic_rows, *simulated_rows, *telemetry_rows]
     if not rows:
         raise SystemExit("No MLP training rows available. Generate synthetic rows or collect telemetry first.")
     model, metrics, splits = train_route_mlp(
@@ -336,10 +679,20 @@ def main() -> None:
         learning_rate=args.learning_rate,
         seed=args.seed,
     )
-    metrics["metadata"]["training_source"] = (
-        "telemetry_only" if args.telemetry_only else "synthetic_plus_telemetry" if telemetry_rows else "hard_synthetic_llm_route_cases"
-    )
+    if args.telemetry_only:
+        training_source = "telemetry_only"
+    elif telemetry_rows and simulated_rows:
+        training_source = "synthetic_plus_simulated_plus_real_telemetry"
+    elif telemetry_rows:
+        training_source = "synthetic_plus_real_telemetry"
+    elif simulated_rows:
+        training_source = "synthetic_plus_simulated_production_telemetry"
+    else:
+        training_source = "hard_synthetic_llm_route_cases"
+    metrics["metadata"]["training_source"] = training_source
     metrics["metadata"]["synthetic_samples"] = len(synthetic_rows)
+    metrics["metadata"]["simulated_telemetry_samples"] = len(simulated_rows)
+    metrics["metadata"]["simulated_telemetry_is_real"] = False
     metrics["metadata"]["telemetry_samples"] = len(telemetry_rows)
     metrics["metadata"]["telemetry_path"] = _portable_path(args.telemetry_path)
     model.metadata.update(metrics["metadata"])  # keep model.json metadata aligned with metrics.json.
@@ -356,6 +709,7 @@ def main() -> None:
                 "ok": True,
                 "outputs": outputs,
                 "synthetic_samples": len(synthetic_rows),
+                "simulated_telemetry_samples": len(simulated_rows),
                 "telemetry_samples": len(telemetry_rows),
                 "dataset_distribution": metrics["metadata"]["dataset_distribution"],  # type: ignore[index]
                 "train": metrics["train"],
@@ -949,6 +1303,7 @@ def _classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, 
         "weighted_f1": float(weighted_f1 / total),
         "top2_accuracy": top2_hits,
         "log_loss": _cross_entropy(y_true, probs),
+        **_calibration_metrics(y_true, probs),
         "confusion_matrix": matrix.astype(int).tolist(),
         "per_class": per_class,
     }
@@ -956,7 +1311,14 @@ def _classification_metrics(y_true: np.ndarray, probs: np.ndarray) -> dict[str, 
 
 def _predict_probs(model: NeuralRouteModel, x_raw: np.ndarray) -> np.ndarray:
     x_norm = (x_raw - model.feature_mean) / model.feature_std
-    return _forward(x_norm, model.weights1, model.bias1.reshape(1, -1), model.weights2, model.bias2.reshape(1, -1))
+    logits = _forward_logits(
+        x_norm,
+        model.weights1,
+        model.bias1.reshape(1, -1),
+        model.weights2,
+        model.bias2.reshape(1, -1),
+    )
+    return _softmax(logits / model.calibration_temperature)
 
 
 def _forward(
@@ -966,8 +1328,59 @@ def _forward(
     weights2: np.ndarray,
     bias2: np.ndarray,
 ) -> np.ndarray:
+    return _softmax(_forward_logits(x_norm, weights1, bias1, weights2, bias2))
+
+
+def _forward_logits(
+    x_norm: np.ndarray,
+    weights1: np.ndarray,
+    bias1: np.ndarray,
+    weights2: np.ndarray,
+    bias2: np.ndarray,
+) -> np.ndarray:
     hidden = np.maximum(0.0, x_norm @ weights1 + bias1)
-    return _softmax(hidden @ weights2 + bias2)
+    return hidden @ weights2 + bias2
+
+
+def _fit_temperature_scaling(y_true: np.ndarray, logits: np.ndarray) -> float:
+    candidates = np.exp(np.linspace(np.log(0.35), np.log(6.0), 420))
+    losses = np.asarray([_cross_entropy(y_true, _softmax(logits / temperature)) for temperature in candidates])
+    return float(candidates[int(np.argmin(losses))])
+
+
+def _fit_ood_threshold(x_train_norm: np.ndarray) -> float:
+    top_count = min(5, x_train_norm.shape[1])
+    scores = []
+    for row in np.abs(x_train_norm):
+        top_values = np.partition(row, -top_count)[-top_count:]
+        scores.append(float(np.sqrt(np.mean(np.square(np.minimum(top_values, 25.0))))))
+    return float(max(3.0, np.quantile(np.asarray(scores, dtype=float), 0.995)))
+
+
+def _calibration_metrics(y_true: np.ndarray, probs: np.ndarray, bins: int = 12) -> dict[str, float]:
+    confidences = probs.max(axis=1)
+    predictions = probs.argmax(axis=1)
+    correctness = (predictions == y_true).astype(float)
+    expected_calibration_error = 0.0
+    bin_edges = np.linspace(0.0, 1.0, bins + 1)
+    for index in range(bins):
+        lower = bin_edges[index]
+        upper = bin_edges[index + 1]
+        mask = (confidences > lower) & (confidences <= upper)
+        if index == 0:
+            mask = (confidences >= lower) & (confidences <= upper)
+        if not np.any(mask):
+            continue
+        expected_calibration_error += float(np.mean(mask)) * abs(
+            float(np.mean(correctness[mask])) - float(np.mean(confidences[mask]))
+        )
+    one_hot = _one_hot(y_true, probs.shape[1])
+    brier_score = float(np.mean(np.sum(np.square(probs - one_hot), axis=1)))
+    return {
+        "expected_calibration_error": float(expected_calibration_error),
+        "brier_score": brier_score,
+        "mean_confidence": float(np.mean(confidences)),
+    }
 
 
 def _cross_entropy(y_true: np.ndarray, probs: np.ndarray) -> float:
@@ -1056,7 +1469,8 @@ def _summary_row(split: str, metrics: dict[str, Any]) -> str:
     return (
         f"| {split} | {metrics['accuracy']:.4f} | {metrics['macro_precision']:.4f} | "
         f"{metrics['macro_recall']:.4f} | {metrics['macro_f1']:.4f} | {metrics['weighted_f1']:.4f} | "
-        f"{metrics['top2_accuracy']:.4f} | {metrics['log_loss']:.4f} |"
+        f"{metrics['top2_accuracy']:.4f} | {metrics['log_loss']:.4f} | "
+        f"{metrics['expected_calibration_error']:.4f} | {metrics['brier_score']:.4f} |"
     )
 
 

@@ -8,6 +8,7 @@ from typing import Any
 from app.config import settings
 from app.core.artifacts import ArtifactService
 from app.core.llm import LLMClient, LLMRequiredError
+from app.core.llm_capabilities import LLMCapability
 from app.recognition_simulator import RecognitionSimulationBundle, RecognitionSimulationService
 from app.state import AgentGraphState, AxisSpec, CriticalPoint, PlotRegionHint, RecognitionResult
 
@@ -273,7 +274,7 @@ class RecognitionAgent:
             if settings.require_llm_for_agents:
                 if not image_asset.data_url:
                     raise LLMRequiredError("RecognitionAgent 收到了截图任务，但当前图片数据为空，无法执行真实多模态识别。")
-                self.llm_client.require_configured(agent_name="RecognitionAgent", capability="多模态相图识别")
+                self.llm_client.require_configured(agent_name="RecognitionAgent", capability=LLMCapability.VISION_RECOGNITION)
             return self._fallback_result(state)
 
         request = state["request"]
@@ -302,6 +303,7 @@ class RecognitionAgent:
                 image_data_url=image_asset.data_url,
                 max_tokens=1200,
                 temperature=0.1,
+                capability=LLMCapability.VISION_RECOGNITION,
             )
         except RuntimeError as exc:
             if settings.require_llm_for_agents:

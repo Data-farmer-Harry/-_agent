@@ -9,6 +9,7 @@ import sqlite3
 
 from app.config import settings
 from app.core.llm import LLMClient
+from app.core.llm_capabilities import LLMCapability
 from app.state import (
     AgentChatRequest,
     ConversationTurn,
@@ -572,6 +573,7 @@ class LongTermMemoryStore:
                 ),
                 max_tokens=180,
                 temperature=0.1,
+                capability=LLMCapability.MEMORY_SUMMARY,
             )
         except Exception:  # noqa: BLE001
             return ""

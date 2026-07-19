@@ -39,17 +39,22 @@ capability → 安全下限特征
         ↓
 单隐藏层 MLP → fast / balanced / strong / vision 概率
         ↓
-置信度阈值 + capability floor → 最终 tier
+Temperature Scaling → 校准概率
+        ↓
+置信度 + Top-1/Top-2 margin + entropy + OOD 检查
+        ↓
+模型能力兼容性 + capability floor → 最终 tier
 ```
 
 | 模式 | 行为 |
 | --- | --- |
 | `shadow` | 记录 MLP 推荐、概率和置信度，不改变规则决策。 |
-| `guarded` | 置信度达标后允许覆盖规则 tier。 |
+| `guarded` | 校准置信度、概率间隔、熵和 OOD 检查全部达标后才允许覆盖规则 tier。 |
 | capability floor | LAMMPS、repair、judge、vision 等仍受最低 tier 限制。 |
+| model capability check | 模型声明的 structured output、code、reasoning、vision 能力必须覆盖调用要求。 |
 | downgrade policy | 是否允许降级由配置控制，高风险能力仍不能低于安全下限。 |
 
-模型与报告位于 `backend/models/llm_route_mlp/`。训练集覆盖 clean、mixed、adversarial、long-noise 和 deployment-wrapper 样本；测试集采用分层冻结切分，并额外运行手写 probe。当前结果属于合成路由分类指标，不能直接等价为线上回答质量或真实成本下降；正式实验仍应加入人工标注流量、时间切分、provider OOD、P95 延迟和质量保持率。
+模型与报告位于 `backend/models/llm_route_mlp/`。训练数据分别记录规则构造样本、仿真生产遥测与隐私安全真实遥测；仿真生产遥测根据候选层级的质量、延迟、成本、成功率和 capability floor 生成，并明确标记为非真实用户流量。训练流程使用独立 calibration split 拟合 Temperature Scaling 和 OOD 阈值，再在冻结 test 与手写 probe 上评估。现有结果仍不能直接等价为线上回答质量或真实成本下降；正式实验还应持续增加人工复核流量、时间切分、provider OOD、P95 延迟和质量保持率。
 
 ## 3. Process Reward Model 与搜索式 DAG
 

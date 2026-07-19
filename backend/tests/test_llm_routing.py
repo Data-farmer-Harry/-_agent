@@ -9,6 +9,7 @@ from urllib import error
 
 from app.config import settings
 from app.core.llm import LLMClient, llm_call_context
+from app.core.llm_capabilities import ModelCapability
 from app.core.llm_routing import LLMRoute, LLMRouter, LLMRoutingConfig, load_llm_routing_config
 
 
@@ -70,6 +71,34 @@ class LLMRoutingTests(unittest.TestCase):
 
         self.assertEqual(decision.tier, "vision")
         self.assertIn("vision_or_multimodal", decision.reasons)
+        self.assertTrue(decision.policy_metadata["model_capability_check"]["compatible"])
+
+    def test_strict_model_capability_check_rejects_incompatible_route(self) -> None:
+        router = LLMRouter(
+            LLMRoutingConfig(
+                strict_model_capabilities=True,
+                routes={
+                    "vision": LLMRoute(
+                        model="text-only-model",
+                        capabilities=(ModelCapability.TEXT.value, ModelCapability.STRUCTURED_OUTPUT.value),
+                    )
+                },
+                fallbacks={"vision": ""},
+            )
+        )
+        decision = router.decide(
+            system_prompt="Analyze image.",
+            user_prompt="识别上传图片。",
+            max_tokens=900,
+            temperature=0.1,
+            capability="vision.recognition",
+            multimodal=True,
+        )
+
+        self.assertFalse(decision.policy_metadata["model_capability_check"]["compatible"])
+        self.assertIn("vision", decision.policy_metadata["model_capability_check"]["missing"])
+        with self.assertRaisesRegex(RuntimeError, "does not declare required capabilities"):
+            router.require_model_compatibility(decision)
 
     def test_router_does_not_infer_vision_from_generic_system_capability_text(self) -> None:
         router = LLMRouter()
@@ -123,6 +152,11 @@ class LLMRoutingTests(unittest.TestCase):
                                 "model": "provider/strong-model",
                                 "timeout_seconds": 99,
                                 "max_tokens": 3333,
+                                "capabilities": ["text", "structured_output", "code", "reasoning"],
+                                "capabilities_verified": True,
+                                "context_window_tokens": 128000,
+                                "latency_class": "high",
+                                "cost_class": "high",
                             }
                         },
                         "fallbacks": {"balanced": "strong", "strong": ""},
@@ -138,6 +172,10 @@ class LLMRoutingTests(unittest.TestCase):
         self.assertEqual(config.balanced_max_score, 60)
         self.assertEqual(config.route_for("strong").model, "provider/strong-model")
         self.assertEqual(config.route_for("strong").timeout_seconds, 99)
+        self.assertIn("code", config.route_for("strong").capabilities)
+        self.assertTrue(config.route_for("strong").capabilities_verified)
+        self.assertEqual(config.route_for("strong").context_window_tokens, 128000)
+        self.assertEqual(config.route_for("strong").latency_class, "high")
         self.assertEqual(config.fallbacks["balanced"], "strong")
         self.assertEqual(config.fallbacks["strong"], "")
         self.assertEqual(config.capability_min_tiers["lammps"], "strong")

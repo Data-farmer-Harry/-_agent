@@ -6,6 +6,7 @@ from typing import Any
 
 from app.config import settings
 from app.core.llm import LLMClient, LLMRequiredError
+from app.core.llm_capabilities import LLMCapability
 from app.orchestration import DAGNode, DAGPlan, DAGValidationError, validate_dag_plan
 from app.state import AgentGraphState, TaskRoute
 
@@ -674,7 +675,7 @@ class SupervisorAgent:
         heuristic = self._with_supervisor_audit(state, self._heuristic_decision(state))
         if not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
-                self.llm_client.require_configured(agent_name="SupervisorAgent", capability="任务路由决策")
+                self.llm_client.require_configured(agent_name="SupervisorAgent", capability=LLMCapability.SUPERVISOR_ROUTE)
             heuristic_audit = heuristic.get("supervisor_audit") or {}
             if heuristic_audit.get("passed") is False:
                 return self._safe_fallback_after_dag_failure(state, heuristic, heuristic_audit)
@@ -729,7 +730,7 @@ class SupervisorAgent:
                 ),
                 max_tokens=600,
                 temperature=0.1,
-                capability="supervisor.route",
+                capability=LLMCapability.SUPERVISOR_ROUTE,
             )
         except RuntimeError as exc:
             if settings.require_llm_for_agents:

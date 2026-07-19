@@ -6,6 +6,7 @@ from typing import Any
 
 from app.config import settings
 from app.core.llm import LLMClient, LLMRequiredError
+from app.core.llm_capabilities import LLMCapability
 from app.state import DiagramRequest
 from app.thermo.codegen import CodeGenerationService
 from app.thermo.rag_service import ThermoRagService
@@ -108,7 +109,14 @@ class PhaseDiagramAgentService:
             return "ternary"
         return "binary" if ("binary" in lowered or "二元" in lowered or fallback == "binary") else fallback
 
-    def _call_json_llm(self, *, system_prompt: str, user_prompt: str, max_tokens: int) -> dict[str, Any] | None:
+    def _call_json_llm(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        capability: str,
+    ) -> dict[str, Any] | None:
         if not self.llm_client.is_configured():
             return None
         return self.llm_client.chat_json(
@@ -116,6 +124,7 @@ class PhaseDiagramAgentService:
             user_prompt=user_prompt,
             max_tokens=max_tokens,
             temperature=0.1,
+            capability=capability,
         )
 
     @staticmethod
@@ -172,6 +181,7 @@ class PhaseDiagramAgentService:
                         f"Caller defaults:\n{json.dumps(overrides, ensure_ascii=False)}"
                     ),
                     max_tokens=700,
+                    capability=LLMCapability.PHASE_REQUEST_PARSE,
                 )
                 if llm_payload:
                     candidate = DiagramRequest(
@@ -216,7 +226,7 @@ class PhaseDiagramAgentService:
                 if settings.require_llm_for_agents:
                     raise LLMRequiredError(f"PhaseDiagramAgent 在解析生成请求时调用 LLM 失败：{exc}") from exc
         elif settings.require_llm_for_agents:
-            self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability="相图请求解析")
+            self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability=LLMCapability.PHASE_REQUEST_PARSE)
 
         return fallback_request, {
             "source": "heuristic_request_interpreter",
@@ -328,6 +338,7 @@ class PhaseDiagramAgentService:
                         "Blocking issues should only be used for: wrong system, wrong execution mode, missing required phase names, missing database markers, or broken HTML/output contract."
                     ),
                     max_tokens=700,
+                    capability=LLMCapability.PHASE_REVIEW,
                 )
                 if llm_payload:
                     review_mode = "llm_plus_heuristic_guardrail"
@@ -354,7 +365,7 @@ class PhaseDiagramAgentService:
                 if settings.require_llm_for_agents:
                     raise LLMRequiredError(f"PhaseDiagramAgent 在结果审查阶段调用 LLM 失败：{exc}") from exc
         elif settings.require_llm_for_agents:
-            self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability="结果自检与审查")
+            self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability=LLMCapability.PHASE_REVIEW)
 
         passed = not blocking_issues
         confidence = max(0.2, 0.94 - 0.16 * len(blocking_issues) - 0.04 * len(advisory_issues))

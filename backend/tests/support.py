@@ -378,9 +378,10 @@ class ScriptedLLMClient:
         image_data_url: str,
         max_tokens: int = 2000,
         temperature: float = 0.1,
+        capability: str = "vision",
     ) -> dict[str, Any] | None:
         _ = system_prompt, image_data_url, max_tokens, temperature
-        self.calls.append({"method": "chat_multimodal_json", "user_prompt": user_prompt})
+        self.calls.append({"method": "chat_multimodal_json", "user_prompt": user_prompt, "capability": capability})
         user_message = self._extract_user_message(user_prompt)
         system_name = self._extract_system_name(user_message)
         return {

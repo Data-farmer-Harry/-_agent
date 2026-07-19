@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from app.config import CONFIGS_ROOT, settings
+from app.core.llm_capabilities import (
+    ModelCapability,
+    get_capability_spec,
+    public_capability_registry,
+)
 from app.core.llm_route_learning import LearnedPolicyConfig, LearnedRouteRecommender, routing_focus_text
 
 
@@ -15,6 +20,12 @@ DEFAULT_LLM_ROUTING_CONFIG = CONFIGS_ROOT / "llm_routing.json"
 LLM_ROUTING_CONFIG_ENV = "PHASE_DIAGRAM_LLM_ROUTING_CONFIG"
 TIER_ORDER = ("fast", "balanced", "strong")
 VISION_TIER = "vision"
+DEFAULT_MODEL_CAPABILITIES = (
+    ModelCapability.TEXT.value,
+    ModelCapability.STRUCTURED_OUTPUT.value,
+    ModelCapability.CODE.value,
+    ModelCapability.REASONING.value,
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +44,11 @@ class LLMRoute:
     max_tokens: int | None = None
     temperature: float | None = None
     enable_thinking: bool | None = None
+    capabilities: tuple[str, ...] = DEFAULT_MODEL_CAPABILITIES
+    capabilities_verified: bool = False
+    context_window_tokens: int = 64_000
+    latency_class: str = "standard"
+    cost_class: str = "standard"
 
     def effective_api_base_url(self) -> str:
         return (self.api_base_url or settings.llm_api_base_url).rstrip("/")
@@ -56,6 +72,18 @@ class LLMRoute:
     def effective_enable_thinking(self) -> bool:
         return bool(settings.llm_enable_thinking if self.enable_thinking is None else self.enable_thinking)
 
+    def model_capability_check(self, required: set[str]) -> dict[str, object]:
+        available = {item.strip().lower() for item in self.capabilities if item.strip()}
+        missing = sorted(required - available)
+        return {
+            "compatible": not missing,
+            "required": sorted(required),
+            "available": sorted(available),
+            "missing": missing,
+            "capabilities_verified": self.capabilities_verified,
+            "context_window_tokens": self.context_window_tokens,
+        }
+
     def public_payload(self) -> dict[str, object]:
         return {
             "model": self.effective_model(),
@@ -66,6 +94,11 @@ class LLMRoute:
             "max_tokens": int(self.max_tokens or settings.llm_max_tokens),
             "temperature": self.temperature,
             "enable_thinking": self.effective_enable_thinking(),
+            "capabilities": list(self.capabilities),
+            "capabilities_verified": self.capabilities_verified,
+            "context_window_tokens": self.context_window_tokens,
+            "latency_class": self.latency_class,
+            "cost_class": self.cost_class,
         }
 
 
@@ -76,6 +109,7 @@ class LLMRoutingConfig:
     balanced_max_score: int = 69
     max_escalations: int = 1
     fallback_on_error: bool = True
+    strict_model_capabilities: bool = True
     learned_policy: LearnedPolicyConfig = field(default_factory=LearnedPolicyConfig)
     routes: dict[str, LLMRoute] = field(default_factory=dict)
     fallbacks: dict[str, str] = field(default_factory=dict)
@@ -140,6 +174,13 @@ def _as_float(value: Any, default: float) -> float:
         return default
 
 
+def _as_string_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return default
+    normalized = tuple(dict.fromkeys(str(item).strip().lower() for item in value if str(item).strip()))
+    return normalized or default
+
+
 def _route_from_payload(payload: Any) -> LLMRoute:
     if not isinstance(payload, dict):
         return LLMRoute()
@@ -151,6 +192,11 @@ def _route_from_payload(payload: Any) -> LLMRoute:
         max_tokens=_as_int(payload.get("max_tokens"), 0) or None,
         temperature=_as_float_or_none(payload.get("temperature")),
         enable_thinking=None if "enable_thinking" not in payload else _as_bool(payload.get("enable_thinking"), False),
+        capabilities=_as_string_tuple(payload.get("capabilities"), DEFAULT_MODEL_CAPABILITIES),
+        capabilities_verified=_as_bool(payload.get("capabilities_verified"), False),
+        context_window_tokens=max(1, _as_int(payload.get("context_window_tokens"), 64_000)),
+        latency_class=str(payload.get("latency_class") or "standard").strip().lower(),
+        cost_class=str(payload.get("cost_class") or "standard").strip().lower(),
     )
 
 
@@ -162,6 +208,9 @@ def _learned_policy_from_payload(payload: Any) -> LearnedPolicyConfig:
         mode=str(payload.get("mode") or "shadow").strip().lower(),
         model_path=str(payload.get("model_path") or "backend/models/llm_route_mlp/model.json").strip(),
         confidence_threshold=max(0.0, min(_as_float(payload.get("confidence_threshold"), 0.62), 1.0)),
+        min_probability_margin=max(0.0, min(_as_float(payload.get("min_probability_margin"), 0.12), 1.0)),
+        max_normalized_entropy=max(0.0, min(_as_float(payload.get("max_normalized_entropy"), 0.78), 1.0)),
+        reject_ood=_as_bool(payload.get("reject_ood"), True),
         allow_downgrade=_as_bool(payload.get("allow_downgrade"), False),
     )
 
@@ -226,6 +275,7 @@ def load_llm_routing_config(
         balanced_max_score=_as_int(raw.get("balanced_max_score"), 69),
         max_escalations=max(0, _as_int(raw.get("max_escalations"), 1)),
         fallback_on_error=_as_bool(raw.get("fallback_on_error"), True),
+        strict_model_capabilities=_as_bool(raw.get("strict_model_capabilities"), True),
         learned_policy=_learned_policy_from_payload(raw.get("learned_policy")),
         routes={**_default_routes(), **routes},
         fallbacks=default_fallbacks,
@@ -234,12 +284,23 @@ def load_llm_routing_config(
 
 
 def _default_routes() -> dict[str, LLMRoute]:
-    inherited = LLMRoute()
     return {
-        "fast": inherited,
-        "balanced": inherited,
-        "strong": inherited,
-        "vision": inherited,
+        "fast": LLMRoute(
+            capabilities=(ModelCapability.TEXT.value, ModelCapability.STRUCTURED_OUTPUT.value),
+            latency_class="low",
+            cost_class="low",
+        ),
+        "balanced": LLMRoute(latency_class="standard", cost_class="standard"),
+        "strong": LLMRoute(latency_class="high", cost_class="high"),
+        "vision": LLMRoute(
+            capabilities=(
+                ModelCapability.TEXT.value,
+                ModelCapability.STRUCTURED_OUTPUT.value,
+                ModelCapability.VISION.value,
+            ),
+            latency_class="high",
+            cost_class="high",
+        ),
     }
 
 
@@ -296,12 +357,14 @@ def llm_routing_public_payload(config: LLMRoutingConfig | None = None) -> dict[s
         "fast_max_score": routing_config.fast_max_score,
         "balanced_max_score": routing_config.balanced_max_score,
         "fallback_on_error": routing_config.fallback_on_error,
+        "strict_model_capabilities": routing_config.strict_model_capabilities,
         "max_escalations": routing_config.max_escalations,
         "config_file": str(Path(os.environ.get(LLM_ROUTING_CONFIG_ENV, "") or DEFAULT_LLM_ROUTING_CONFIG)),
         "learned_policy": learned_recommender.public_payload(),
         "routes": {tier: route.public_payload() for tier, route in routing_config.routes.items()},
         "fallbacks": routing_config.fallbacks,
         "capability_min_tiers": routing_config.capability_min_tiers,
+        "capability_registry": public_capability_registry(),
     }
 
 
@@ -513,15 +576,47 @@ class LLMRouter:
         normalized = _normalize_tier(tier)
         fallback_tier = self.config.fallbacks.get(normalized, "")
         route = self.config.route_for(normalized)
+        capability_spec = get_capability_spec(capability)
+        required_model_capabilities = (
+            {item.value for item in capability_spec.required_model_capabilities}
+            if capability_spec is not None
+            else {ModelCapability.TEXT.value}
+        )
+        compatibility = route.model_capability_check(required_model_capabilities)
+        resolved_reasons = reasons
+        if not compatibility["compatible"]:
+            missing = ",".join(str(item) for item in compatibility["missing"])
+            resolved_reasons = tuple([*reasons, f"model_capability_missing:{missing}"])
+        resolved_metadata = {
+            **(policy_metadata or {}),
+            "capability_spec": {
+                "registered": capability_spec is not None,
+                "minimum_tier": capability_spec.minimum_tier if capability_spec is not None else "",
+                "risk_level": capability_spec.risk_level if capability_spec is not None else "unknown",
+            },
+            "model_capability_check": compatibility,
+        }
         return LLMRoutingDecision(
             tier=normalized,
             score=max(0, min(int(score), 100)),
-            reasons=reasons,
+            reasons=resolved_reasons,
             route=route,
             fallback_tier=fallback_tier,
             capability=capability,
             escalation_depth=escalation_depth,
-            policy_metadata=policy_metadata or {},
+            policy_metadata=resolved_metadata,
+        )
+
+    def require_model_compatibility(self, decision: LLMRoutingDecision) -> None:
+        if not self.config.strict_model_capabilities:
+            return
+        check = decision.policy_metadata.get("model_capability_check")
+        if not isinstance(check, dict) or check.get("compatible") is not False:
+            return
+        missing = ", ".join(str(item) for item in check.get("missing") or [])
+        raise RuntimeError(
+            f"Model route {decision.tier}/{decision.route.effective_model()} does not declare required "
+            f"capabilities for {decision.capability or 'unknown'}: {missing or 'unknown'}."
         )
 
     def _decision_with_advanced_policies(
@@ -589,7 +684,17 @@ class LLMRouter:
         mode = policy.normalized_mode()
         learned_tier = _normalize_tier(recommendation.tier, default=rule_tier)
         confidence = recommendation.confidence
-        augmented_reasons = tuple([*reasons, f"learned_{mode}:{learned_tier}:{confidence:.3f}"])
+        augmented_reasons = tuple(
+            [
+                *reasons,
+                (
+                    f"learned_{mode}:{learned_tier}:{confidence:.3f}:"
+                    f"margin={recommendation.probability_margin:.3f}:"
+                    f"entropy={recommendation.normalized_entropy:.3f}:"
+                    f"ood={recommendation.ood_score:.3f}"
+                ),
+            ]
+        )
         if mode == "shadow":
             return self.decision_for_tier(rule_tier, score=score, reasons=augmented_reasons, capability=capability)
         if confidence < policy.confidence_threshold:
@@ -597,6 +702,27 @@ class LLMRouter:
                 rule_tier,
                 score=score,
                 reasons=tuple([*augmented_reasons, "learned_below_threshold"]),
+                capability=capability,
+            )
+        if recommendation.probability_margin < policy.min_probability_margin:
+            return self.decision_for_tier(
+                rule_tier,
+                score=score,
+                reasons=tuple([*augmented_reasons, "learned_margin_too_small"]),
+                capability=capability,
+            )
+        if recommendation.normalized_entropy > policy.max_normalized_entropy:
+            return self.decision_for_tier(
+                rule_tier,
+                score=score,
+                reasons=tuple([*augmented_reasons, "learned_entropy_too_high"]),
+                capability=capability,
+            )
+        if policy.reject_ood and recommendation.is_ood:
+            return self.decision_for_tier(
+                rule_tier,
+                score=score,
+                reasons=tuple([*augmented_reasons, "learned_ood_rejected"]),
                 capability=capability,
             )
 
@@ -644,6 +770,9 @@ class LLMRouter:
         if not capability:
             return ""
         normalized = capability.replace("_", ".").replace("-", ".")
+        capability_spec = get_capability_spec(normalized)
+        if capability_spec is not None:
+            return capability_spec.minimum_tier
         for marker, tier in self.config.capability_min_tiers.items():
             if marker and marker in normalized:
                 return tier

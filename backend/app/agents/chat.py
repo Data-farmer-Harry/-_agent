@@ -8,6 +8,7 @@ from time import perf_counter
 from app.config import settings
 from app.core.artifacts import ArtifactService
 from app.core.llm import LLMClient, LLMRequiredError
+from app.core.llm_capabilities import LLMCapability
 from app.materials_rag.normalizer import extract_materials, infer_domain_hint, normalize_material
 from app.materials_rag.service import MaterialsRagService
 from app.materials_rag.context_builder import build_materials_rag_context
@@ -117,7 +118,7 @@ class ChatAgent:
         memory_snapshot: MemorySnapshot | None = None,
         recognition_result: RecognitionResult | None = None,
     ) -> PromptSuggestionResponse:
-        self.llm_client.require_configured(agent_name="ChatAgent", capability="上下文动态 prompt 推荐")
+        self.llm_client.require_configured(agent_name="ChatAgent", capability=LLMCapability.PROMPT_SUGGEST)
 
         snapshot = memory_snapshot or MemorySnapshot(conversation_id=request.conversation_id)
         conversation_history = request.conversation_history or snapshot.messages
@@ -160,6 +161,7 @@ class ChatAgent:
             ),
             max_tokens=220,
             temperature=0.45,
+            capability=LLMCapability.PROMPT_SUGGEST,
         )
 
         suggestion = self._normalize_prompt_suggestion(content)
@@ -1121,7 +1123,7 @@ class ChatAgent:
             answer = contextual_answer
         elif not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
-                self.llm_client.require_configured(agent_name="ChatAgent", capability="对话回答与 follow-up 解释")
+                self.llm_client.require_configured(agent_name="ChatAgent", capability=LLMCapability.CHAT_ANSWER)
             answer = self._build_materials_rag_fallback_answer(
                 query=request.message,
                 contextual_answer=contextual_answer,
@@ -1181,7 +1183,7 @@ class ChatAgent:
                     user_prompt=user_prompt,
                     max_tokens=chat_max_tokens,
                     temperature=0.2,
-                    capability="rag.answer" if materials_rag_context else "chat.answer",
+                    capability=LLMCapability.RAG_ANSWER if materials_rag_context else LLMCapability.CHAT_ANSWER,
                 )
             except RuntimeError as exc:
                 if settings.require_llm_for_agents:

@@ -5,6 +5,7 @@ from typing import Optional
 
 from app.config import settings
 from app.core.llm import LLMClient, LLMRequiredError
+from app.core.llm_capabilities import LLMCapability
 from app.thermo.prompts import PromptBuilder
 from app.thermo.registry import get_calculated_binary_card
 from app.state import DiagramRequest
@@ -124,12 +125,13 @@ class CodeGenerationService:
     def _blocking_quality_issues(issues: list[str]) -> list[str]:
         return list(issues)
 
-    def _generate_code_with_llm(self, prompt: str) -> Optional[str]:
+    def _generate_code_with_llm(self, prompt: str, *, capability: str) -> Optional[str]:
         content = self.llm_client.chat_text(
             system_prompt="Return runnable Python only. Use the project-provided local phase-diagram helper exactly when supported.",
             user_prompt=prompt,
             max_tokens=1800,
             temperature=0.1,
+            capability=capability,
         )
         return self._extract_python_code(content)
 
@@ -164,7 +166,7 @@ print(f"output={{report['output_path']}}")
 
         if not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
-                self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability="Python wrapper 代码生成")
+                self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability=LLMCapability.PHASE_CODEGEN)
             deterministic_code = self._build_deterministic_wrapper(request)
             deterministic_code, issues = self.sanitize_and_validate_code(request, deterministic_code)
             if issues:
@@ -173,7 +175,7 @@ print(f"output={{report['output_path']}}")
 
         prompt = self.build_prompt(request)
         try:
-            generated_code = self._generate_code_with_llm(prompt)
+            generated_code = self._generate_code_with_llm(prompt, capability=LLMCapability.PHASE_CODEGEN)
         except RuntimeError as exc:
             if settings.require_llm_for_agents:
                 raise LLMRequiredError(f"PhaseDiagramAgent 在代码生成阶段调用 LLM 失败：{exc}") from exc
@@ -213,11 +215,11 @@ print(f"output={{report['output_path']}}")
     def repair_code(self, request: DiagramRequest, generated_code: str, stderr: str) -> Optional[str]:
         if not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
-                self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability="代码修复")
+                self.llm_client.require_configured(agent_name="PhaseDiagramAgent", capability=LLMCapability.PHASE_CODEGEN_REPAIR)
             return None
         prompt = self.prompt_builder.build_repair_code_prompt(request, generated_code, stderr)
         try:
-            repaired = self._generate_code_with_llm(prompt)
+            repaired = self._generate_code_with_llm(prompt, capability=LLMCapability.PHASE_CODEGEN_REPAIR)
         except RuntimeError as exc:
             if settings.require_llm_for_agents:
                 raise LLMRequiredError(f"PhaseDiagramAgent 在代码修复阶段调用 LLM 失败：{exc}") from exc

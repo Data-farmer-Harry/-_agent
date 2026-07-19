@@ -11,6 +11,7 @@ from app.config import settings
 from app.core.artifacts import ArtifactService
 from app.core.cancellation import RunCancelledError, clear_cancellation
 from app.core.llm import LLMClient, LLMRequiredError
+from app.core.llm_capabilities import LLMCapability
 from app.lammps.attachments import infer_request_overrides, persist_uploaded_assets
 from app.lammps.config import LammpsConfig, lammps_config_public_payload, load_lammps_config
 from app.lammps.multifidelity import evaluate_pilot, plan_multifidelity_run
@@ -1015,7 +1016,7 @@ class LammpsRuntime:
         heuristic = self._heuristic_request(request.message, request.notes, attachment_overrides)
         if not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
-                self.llm_client.require_configured(agent_name="ComputeAgent", capability="LAMMPS 结构化请求解析")
+                self.llm_client.require_configured(agent_name="ComputeAgent", capability=LLMCapability.LAMMPS_REQUEST_PARSE)
             return LammpsRequest.model_validate(heuristic), {"source": "heuristic_request_interpreter", "confidence": 0.55}
 
         registry = get_lammps_registry_payload()
@@ -1037,6 +1038,7 @@ class LammpsRuntime:
                 ),
                 max_tokens=900,
                 temperature=0.1,
+                capability=LLMCapability.LAMMPS_REQUEST_PARSE,
             )
         except RuntimeError as exc:
             if settings.require_llm_for_agents:
@@ -1106,7 +1108,7 @@ class LammpsRuntime:
             return None
         if not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
-                self.llm_client.require_configured(agent_name="ComputeAgent", capability="legacy LAMMPS 请求修复")
+                self.llm_client.require_configured(agent_name="ComputeAgent", capability=LLMCapability.LAMMPS_REQUEST_REPAIR)
             return None
         system_prompt = (
             "You repair a structured LAMMPS request. Return a conservative JSON object containing only "
@@ -1124,6 +1126,7 @@ class LammpsRuntime:
                 user_prompt=user_prompt,
                 max_tokens=700,
                 temperature=0.1,
+                capability=LLMCapability.LAMMPS_REQUEST_REPAIR,
             )
         except RuntimeError as exc:
             if settings.require_llm_for_agents:
@@ -1208,7 +1211,7 @@ class LammpsRuntime:
             return None
         if not self.llm_client.is_configured():
             if settings.require_llm_for_agents:
-                self.llm_client.require_configured(agent_name="ComputeAgent", capability="LAMMPS 请求修复")
+                self.llm_client.require_configured(agent_name="ComputeAgent", capability=LLMCapability.LAMMPS_REQUEST_REPAIR)
             return None
         system_prompt = (
             "You repair a structured LAMMPS request after validation/execution/review feedback. "
@@ -1244,6 +1247,7 @@ class LammpsRuntime:
                         user_prompt=user_prompt,
                         max_tokens=900,
                         temperature=0.1,
+                        capability=LLMCapability.LAMMPS_REQUEST_REPAIR,
                     )
                 )
                 parsed_payload = LLMClient.extract_json_object(raw_text)
@@ -1253,6 +1257,7 @@ class LammpsRuntime:
                     user_prompt=user_prompt,
                     max_tokens=900,
                     temperature=0.1,
+                    capability=LLMCapability.LAMMPS_REQUEST_REPAIR,
                 )
                 if fallback_payload:
                     parsed_payload = fallback_payload
@@ -1483,6 +1488,7 @@ potentials_dir={config.potentials_dir}
                     user_prompt=review_user_prompt,
                     max_tokens=900,
                     temperature=0.1,
+                    capability=LLMCapability.LAMMPS_REVIEW,
                 )
                 parsed_review = parse_review_payload(
                     raw_review_text,
@@ -1495,6 +1501,7 @@ potentials_dir={config.potentials_dir}
                         user_prompt=review_user_prompt,
                         max_tokens=900,
                         temperature=0.1,
+                        capability=LLMCapability.LAMMPS_REVIEW,
                     )
                     if fallback_payload:
                         parsed_review = parse_review_payload(
@@ -1539,7 +1546,7 @@ potentials_dir={config.potentials_dir}
             elif settings.require_llm_for_agents:
                 raise LLMRequiredError("ComputeAgent 需要 LLM 审查 LAMMPS 结果，但本次没有得到有效 JSON。")
         elif settings.require_llm_for_agents:
-            self.llm_client.require_configured(agent_name="ComputeAgent", capability="LAMMPS 结果审查")
+            self.llm_client.require_configured(agent_name="ComputeAgent", capability=LLMCapability.LAMMPS_REVIEW)
 
         passed = not blocking_issues
         confidence = max(0.2, min(0.99, float(red_review.score.overall_score) / 100.0))

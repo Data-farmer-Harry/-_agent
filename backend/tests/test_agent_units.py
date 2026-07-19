@@ -118,7 +118,17 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
 
     def test_recognition_agent_normalizes_min_max_fields_and_preserves_low_temperature_window(self) -> None:
         class NormalizingRecognitionLLM(ScriptedLLMClient):
-            def chat_multimodal_json(self, *, system_prompt: str, user_prompt: str, image_data_url: str, max_tokens: int = 2000, temperature: float = 0.1):  # type: ignore[override]
+            def chat_multimodal_json(
+                self,
+                *,
+                system_prompt: str,
+                user_prompt: str,
+                image_data_url: str,
+                max_tokens: int = 2000,
+                temperature: float = 0.1,
+                capability: str = "vision",
+            ):  # type: ignore[override]
+                _ = capability
                 return {
                     "system": "",
                     "diagram_type": "Binary Phase Diagram",
@@ -164,7 +174,17 @@ class SupervisorAndChatUnitTests(unittest.TestCase):
 
     def test_recognition_agent_normalizes_phase_objects_and_dict_like_strings(self) -> None:
         class RichPhaseRecognitionLLM(ScriptedLLMClient):
-            def chat_multimodal_json(self, *, system_prompt: str, user_prompt: str, image_data_url: str, max_tokens: int = 2000, temperature: float = 0.1):  # type: ignore[override]
+            def chat_multimodal_json(
+                self,
+                *,
+                system_prompt: str,
+                user_prompt: str,
+                image_data_url: str,
+                max_tokens: int = 2000,
+                temperature: float = 0.1,
+                capability: str = "vision",
+            ):  # type: ignore[override]
+                _ = capability
                 return {
                     "system": "Al-Ni",
                     "diagram_type": "binary",

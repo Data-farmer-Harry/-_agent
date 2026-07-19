@@ -110,6 +110,9 @@ class LearnedPolicyConfig:
     mode: str = "shadow"
     model_path: str = "backend/models/llm_route_mlp/model.json"
     confidence_threshold: float = 0.62
+    min_probability_margin: float = 0.12
+    max_normalized_entropy: float = 0.78
+    reject_ood: bool = True
     allow_downgrade: bool = False
 
     def normalized_mode(self) -> str:
@@ -121,6 +124,10 @@ class LearnedPolicyConfig:
 class LearnedRouteRecommendation:
     tier: str
     confidence: float
+    probability_margin: float
+    normalized_entropy: float
+    ood_score: float
+    is_ood: bool
     probabilities: dict[str, float]
     feature_debug: dict[str, object]
 
@@ -128,6 +135,10 @@ class LearnedRouteRecommendation:
         return {
             "tier": self.tier,
             "confidence": self.confidence,
+            "probability_margin": self.probability_margin,
+            "normalized_entropy": self.normalized_entropy,
+            "ood_score": self.ood_score,
+            "is_ood": self.is_ood,
             "probabilities": self.probabilities,
             "feature_debug": self.feature_debug,
         }
@@ -245,6 +256,8 @@ class NeuralRouteModel:
         bias1: np.ndarray,
         weights2: np.ndarray,
         bias2: np.ndarray,
+        calibration_temperature: float = 1.0,
+        ood_threshold: float = 6.0,
         metadata: dict[str, object] | None = None,
     ) -> None:
         self.labels = labels
@@ -255,6 +268,8 @@ class NeuralRouteModel:
         self.bias1 = bias1.astype(float)
         self.weights2 = weights2.astype(float)
         self.bias2 = bias2.astype(float)
+        self.calibration_temperature = max(float(calibration_temperature), 1e-4)
+        self.ood_threshold = max(float(ood_threshold), 0.0)
         self.metadata = metadata or {}
 
     def predict_proba(self, features: RouteFeatureVector) -> dict[str, float]:
@@ -264,17 +279,43 @@ class NeuralRouteModel:
         x_norm = (x - self.feature_mean) / self.feature_std
         hidden = np.maximum(0.0, x_norm @ self.weights1 + self.bias1)
         logits = hidden @ self.weights2 + self.bias2
-        probs = _softmax(logits)[0]
+        probs = _softmax(logits / self.calibration_temperature)[0]
         return {label: float(prob) for label, prob in zip(self.labels, probs, strict=True)}
+
+    def ood_score(self, features: RouteFeatureVector) -> float:
+        if features.names != self.feature_names:
+            raise ValueError("Feature schema mismatch for learned route model.")
+        x = np.asarray(features.values, dtype=float)
+        standardized = np.abs((x - self.feature_mean) / self.feature_std)
+        top_count = min(5, len(standardized))
+        top_values = np.partition(standardized, -top_count)[-top_count:]
+        return float(np.sqrt(np.mean(np.square(np.minimum(top_values, 25.0)))))
 
     def recommend(self, features: RouteFeatureVector) -> LearnedRouteRecommendation:
         probabilities = self.predict_proba(features)
-        tier = max(probabilities, key=probabilities.get)
+        ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+        tier, confidence = ranked[0]
+        second_probability = ranked[1][1] if len(ranked) > 1 else 0.0
+        probability_margin = max(0.0, confidence - second_probability)
+        probability_values = np.asarray(list(probabilities.values()), dtype=float)
+        normalized_entropy = float(
+            -np.sum(probability_values * np.log(np.clip(probability_values, 1e-12, 1.0)))
+            / max(math.log(len(probability_values)), 1e-12)
+        )
+        ood_score = self.ood_score(features)
         return LearnedRouteRecommendation(
             tier=tier,
-            confidence=float(probabilities[tier]),
+            confidence=float(confidence),
+            probability_margin=float(probability_margin),
+            normalized_entropy=normalized_entropy,
+            ood_score=ood_score,
+            is_ood=bool(ood_score > self.ood_threshold),
             probabilities=probabilities,
-            feature_debug=features.debug,
+            feature_debug={
+                **features.debug,
+                "calibration_temperature": self.calibration_temperature,
+                "ood_threshold": self.ood_threshold,
+            },
         )
 
     def to_payload(self) -> dict[str, object]:
@@ -289,6 +330,11 @@ class NeuralRouteModel:
             "bias1": self.bias1.tolist(),
             "weights2": self.weights2.tolist(),
             "bias2": self.bias2.tolist(),
+            "calibration": {
+                "method": "temperature_scaling",
+                "temperature": self.calibration_temperature,
+                "ood_threshold": self.ood_threshold,
+            },
             "metadata": self.metadata,
         }
 
@@ -300,6 +346,7 @@ class NeuralRouteModel:
     def from_payload(cls, payload: dict[str, object]) -> "NeuralRouteModel":
         if payload.get("schema_version") != "llm-route-mlp/v1":
             raise ValueError("Unsupported learned route model schema.")
+        calibration = payload.get("calibration") if isinstance(payload.get("calibration"), dict) else {}
         return cls(
             labels=tuple(str(label) for label in payload["labels"]),  # type: ignore[index]
             feature_names=tuple(str(name) for name in payload["feature_names"]),  # type: ignore[index]
@@ -309,6 +356,8 @@ class NeuralRouteModel:
             bias1=np.asarray(payload["bias1"], dtype=float),  # type: ignore[index]
             weights2=np.asarray(payload["weights2"], dtype=float),  # type: ignore[index]
             bias2=np.asarray(payload["bias2"], dtype=float),  # type: ignore[index]
+            calibration_temperature=float(calibration.get("temperature") or 1.0),
+            ood_threshold=float(calibration.get("ood_threshold") or 6.0),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
 
@@ -370,6 +419,9 @@ class LearnedRouteRecommender:
             "available": self.available,
             "load_error": self.load_error,
             "confidence_threshold": self.config.confidence_threshold,
+            "min_probability_margin": self.config.min_probability_margin,
+            "max_normalized_entropy": self.config.max_normalized_entropy,
+            "reject_ood": self.config.reject_ood,
             "allow_downgrade": self.config.allow_downgrade,
             "model_metadata": self.model.metadata if self.model else {},
         }

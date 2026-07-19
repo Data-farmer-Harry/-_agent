@@ -4,6 +4,7 @@
   "balanced_max_score": 69,
   "fallback_on_error": true,
   "max_escalations": 1,
+  "strict_model_capabilities": true,
   "routes": {
     "fast": {
       "api_base_url": "https://api.deepseek.com",
@@ -12,7 +13,33 @@
       "timeout_seconds": 45,
       "max_tokens": 1200,
       "temperature": 0.1,
-      "enable_thinking": false
+      "enable_thinking": false,
+      "capabilities": ["text", "structured_output"],
+      "capabilities_verified": true,
+      "context_window_tokens": 64000,
+      "latency_class": "low",
+      "cost_class": "low"
+    },
+    "balanced": {
+      "capabilities": ["text", "structured_output", "code", "reasoning"],
+      "capabilities_verified": false,
+      "context_window_tokens": 64000,
+      "latency_class": "standard",
+      "cost_class": "standard"
+    },
+    "strong": {
+      "capabilities": ["text", "structured_output", "code", "reasoning"],
+      "capabilities_verified": false,
+      "context_window_tokens": 64000,
+      "latency_class": "high",
+      "cost_class": "high"
+    },
+    "vision": {
+      "capabilities": ["text", "structured_output", "vision"],
+      "capabilities_verified": false,
+      "context_window_tokens": 64000,
+      "latency_class": "high",
+      "cost_class": "high"
     }
   },
   "fallbacks": {
@@ -26,6 +53,9 @@
     "mode": "guarded",
     "model_path": "backend/models/llm_route_mlp/model.json",
     "confidence_threshold": 0.72,
+    "min_probability_margin": 0.16,
+    "max_normalized_entropy": 0.72,
+    "reject_ood": true,
     "allow_downgrade": true,
     "notes": [
       "Run `conda run -n lammps_agent python backend/benchmarks/train_llm_route_mlp.py` to retrain the local MLP model.",

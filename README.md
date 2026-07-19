@@ -73,11 +73,13 @@ Supervisor 同时校验 route contract、计算前置条件、跨域冲突和 DA
 | 机制 | 作用 |
 | --- | --- |
 | <code>shadow</code> | 只记录 MLP 推荐和概率，不改变线上决策 |
-| <code>guarded</code> | 推荐稳定且不违反规则时，才允许调整默认层级 |
-| capability floor | LAMMPS、repair、judge、vision 不得降到不安全模型 |
+| <code>guarded</code> | 校准置信度、Top-1/Top-2 间隔、预测熵和 OOD 检查同时通过后，才允许调整默认层级 |
+| capability registry | 集中声明每类调用的最低 tier、风险级别和所需模型能力 |
+| model profile | 为各层级声明 structured output、code、reasoning、vision、上下文窗口、延迟和成本等级 |
+| capability floor | LAMMPS、repair、judge、vision 不得降到不安全或能力不兼容的模型 |
 | telemetry | 仅保存 prompt hash、特征与决策，不保存原始问题或 API Key |
 
-离线样例用于观察三个效果：简单任务是否倾向低成本层级、复杂任务是否升级、加入长上下文或 deployment wrapper 后推荐是否仍保持稳定。最终选择始终受规则基线和 capability floor 约束，因此评估只讨论推荐行为、能力下限与稳定性，不把它包装成独立分类任务。
+离线样例用于观察三个效果：简单任务是否倾向低成本层级、复杂任务是否升级、加入长上下文或 deployment wrapper 后推荐是否仍保持稳定。训练数据把构造样本、明确标注的仿真生产遥测和隐私安全真实路由遥测分开统计；仿真数据不会被包装成真实用户流量。最终选择始终受规则基线、模型能力检查和 capability floor 约束，因此评估只讨论推荐行为、能力下限与稳定性，不把它包装成线上回答质量。
 
 ### 3. 风险感知 RAG：只有需要证据时才检索
 

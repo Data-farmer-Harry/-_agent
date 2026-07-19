@@ -404,6 +404,7 @@ class LLMClient:
         )
         self._remember_route(decision)
         try:
+            self.router.require_model_compatibility(decision)
             content = self._post_messages(messages, max_tokens=max_tokens, temperature=temperature, decision=decision)
             self._record_routing_telemetry(
                 decision=decision,
@@ -457,6 +458,7 @@ class LLMClient:
                 raise
             self._remember_route(fallback)
             try:
+                self.router.require_model_compatibility(fallback)
                 content = self._post_messages(messages, max_tokens=max_tokens, temperature=temperature, decision=fallback)
             except RuntimeError as fallback_exc:
                 self._record_routing_telemetry(
